@@ -51,7 +51,7 @@ appropriate per-arch systemd UEFI stub (`linuxx64.efi.stub`,
 ### 2. Assemble the multi-arch ISO
 
 ```sh
-cloud-boot iso \
+cloud-boot-iso \
   --uki linux/amd64=boot-amd64.efi             \
   --uki linux/arm64=boot-arm64.efi             \
   --uki linux/riscv64=boot-riscv64.efi         \
@@ -59,13 +59,16 @@ cloud-boot iso \
   -o boot.iso
 ```
 
-Each `--uki linux/<arch>=<path>` entry resolves to the right
-`BOOT<ARCH>.EFI` filename via `build.ArchProfiles`. You can omit
-arches you don't need:
+`cloud-boot-iso` lives in [`cloud-boot/iso`](https://github.com/cloud-boot/iso)
+as a standalone binary (it was previously a subcommand of
+`cloud-boot`; the assembler logic is generic and applies to any
+PE32+/EFI app, UKI or tamago unikernel alike). Each
+`--uki linux/<arch>=<path>` entry resolves to the right
+`BOOT<ARCH>.EFI` filename. You can omit arches you don't need:
 
 ```sh
 # x86_64 + arm64 only — no riscv64 leg
-cloud-boot iso \
+cloud-boot-iso \
   --uki linux/amd64=boot-amd64.efi \
   --uki linux/arm64=boot-arm64.efi \
   -o boot.iso
