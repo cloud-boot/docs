@@ -961,6 +961,87 @@ Risks:
   (live regression confirmed 2026-06-07 — see "live validation
   results (post-R-M2c narrow)" below).
 
+### M2-A — packed-ring virtqueue (R-M2c Option A experiment)
+
+**Deliverable.** Pure-Go implementation of the packed-virtqueue
+transport (Virtio 1.1 §2.7) on top of the existing modern PCI
+transport, with the virtio-net driver dispatching between split-ring
+and packed-ring layouts based on whether `VIRTIO_F_RING_PACKED`
+(bit 34) is negotiated. Built on its own branch `m2-a-ring-packed`
+as a draft PR per the R-M2c follow-up plan: hypothesis is that Apple
+VZ's host-side virtio-net dispatch ONLY runs when the client
+negotiates RING_PACKED (Linux's VZ virtio-net is known to default to
+the packed-ring transport).
+
+Scope:
+
+- `uefiboard/virtqueue_packed.go` — host-buildable layout + driver
+  primitives. Defines `PackedVirtqueueLayout` (descriptor ring +
+  driver-event + device-event regions), `PackedVirtqueue` driver-side
+  handle, and the `AddBuffer` / `PollUsed` / `Reclaim` /
+  `writePackedDescriptor` state machine including the
+  `driverWrapCounter` / `deviceWrapCounter` arithmetic (Virtio 1.1
+  §2.7.1 — both start at 1, toggle on Size-boundary crossings).
+- `uefiboard/virtqueue_packed_tamago.go` — live `NewPackedVirtqueue`
+  using `gBS->AllocatePages(EfiBootServicesData)` with
+  `zeroPages` (same allocator surface as the split-ring path).
+- `uefiboard/virtqueue_packed_test.go` — 18 host-side tests, 97.2%
+  per-function statement coverage on the new file (layout math,
+  descriptor read/write, AddBuffer flag-bit encoding, wrap counter
+  toggle on ring wrap, PollUsed completion detection with the device
+  wrap counter, multi-round drain).
+- `uefiboard/virtio_net_tamago.go` — `VirtioNet` gains `usePacked`
+  flag + `prxq` / `ptxq` (packed) alongside the existing `rxq` /
+  `txq` (split). `openVirtioNetCore` dispatches: when
+  `negotiated & VirtioFeatureRingPacked != 0`, calls
+  `setupPackedQueue` which publishes the descriptor ring +
+  driver-event + device-event addresses via the EXISTING
+  `queue_desc` / `queue_driver` / `queue_device` registers (the
+  registers are unchanged from split-ring; only the interpretation
+  of what they point at differs per Virtio 1.1 §2.7).
+  `TransmitFrame` / `ReceiveFrame` / `fillRxRing` dispatch on
+  `usePacked` to the corresponding packed-ring helpers.
+- `uefiboard/virtio_net.go` — `VirtioNetAcceptedFeaturesWithPacked`
+  promoted from "diagnostic only" to the M2-A production accepted
+  mask. `VirtioFeatureRingPacked` added to `virtio_modern.go`.
+- `phase2_virtionet_packed_tx.go` + `_stub.go` — M2-A probe under
+  build tag `phase2_virtionet_packed_tx`. Brings the device up via
+  `OpenVirtioNetWithFeatures(pciIO, VirtioNetAcceptedFeaturesWithPacked)`,
+  confirms RING_PACKED actually negotiated (vs being stripped),
+  emits ARP TX through TransmitFrame's packed-ring path, polls RX.
+  Includes an instrumented `packedTransmitFrameDiag` that dumps
+  descriptor + driver-event + device-event byte snapshots via the
+  M1.6 blkprintk side-channel for VZ observability.
+- Taskfile entries `virtionetp:elf:<arch>` /
+  `virtionetp:efi:<arch>` / `virtionetp:all` produce
+  `BOOT<ARCH>-VIRTIONETP.EFI`.
+
+Validation status (commit `554ae03` on branch `m2-a-ring-packed`):
+
+- Host-side tests: PASS, 18/18, 97.2% per-function coverage on
+  `virtqueue_packed.go`.
+- TamaGo build: PASS for all 4 GOARCHes (amd64, arm64, loong64,
+  riscv64) under both `phase2_virtionet_tx` (split-ring regression
+  check) and `phase2_virtionet_packed_tx` (M2-A probe).
+- QEMU+EDK2 live regression for split-ring: artifacts produced
+  bit-identical to pre-M2-A binaries when only `phase2_virtionet_tx`
+  is set (the packed-ring path is unreachable until the
+  WITH_PACKED mask is used by the probe). The dispatcher routing
+  is byte-stable on the QEMU 4-arch cells; the live regression
+  re-run is deferred to wall-clock validation.
+- Apple VZ live experiment: NOT YET RUN at the time this section
+  was added; the branch is open for live test. Results to be
+  recorded in the PR body.
+
+Acceptance for M2-A: an ARP reply from `192.168.64.1` (vfkit's NAT
+gateway) appears in the M2-A probe's RX poll on VZ. If met, M2-A
+becomes the production VZ rail and the split-ring M2 path is kept
+only for QEMU regression. If not met, the diagnostic dump narrows
+where the device stalls (descriptor flags untouched? device flipped
+F_USED but data garbage? completely silent on the doorbell?) and
+guides the M2-B (post-EBS direct MMIO) and M2.1 (SNP wrapper) next
+steps.
+
 Acceptance: an ARP request emitted by our driver gets an ARP reply
 visible in our RX ring on QEMU+EDK2 (any arch with PCI IO virtio-net,
 configured `disable-legacy=on,disable-modern=off`). VZ init-OK
