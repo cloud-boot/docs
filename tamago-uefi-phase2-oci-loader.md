@@ -317,52 +317,137 @@ recorded in §5 R-M1'a (`logFilePath` captures 0 bytes, `stdio`
 errors out, `pty` errors out). Block IO side-channel deferred to
 M1.6 (below).
 
-### M1.6 — VZ observability via Block IO side-channel (placeholder)
+### M1.6 — VZ observability via Block IO side-channel (done 2026-06-07)
 
-**Deliverable.** A pure-Go EFI_BLOCK_IO_PROTOCOL writer in
-`uefiboard/` that lets the probe write its captured-output
-buffer to a known LBA on a writable virtio-blk disk before
-halting. The host then inspects the disk file post-halt and
-recovers the probe output. This closes R-M1'a without needing to
-implement a virtio-console driver inside the probe.
+**Deliverable shipped.** A pure-Go `EFI_BLOCK_IO_PROTOCOL` binding
+in `uefiboard/` plus a side-channel print-tee that mirrors every
+ConOut byte into a 32 KiB ring buffer, flushed to LBA 0 of a
+host-pre-staged virtio-blk scratch disk via the firmware's Block
+IO `WriteBlocks` + `FlushBlocks`. The host then reads the disk
+file post-halt and recovers the probe output. **R-M1'a CLOSED.**
+(See R-M1'a in §5 for the full VZ capability matrix surfaced by
+the side-channel.)
 
-Why not pull forward a virtio-console driver from M2: because M2
-virtqueue infra targets virtio-net's RX/TX rings, which are
-different from virtio-console's CO/CI rings (and from
-virtio-serial's port-control sub-protocol). A Block-IO write goes
-through the firmware's existing virtio-blk driver — zero extra
-code on the guest side beyond a few `efiCall(WriteBlocks, ...)`s.
+Source layout (committed):
 
-Scope (when M1.6 runs):
+- `uefiboard/block_io_protocol.go` — type surface: GUID
+  `964E5B21-6459-11D2-8E39-00A0C969723B`, function-table offsets
+  (Revision=0 / Media=8 / Reset=16 / ReadBlocks=24 / WriteBlocks=32
+  / FlushBlocks=40), `EFI_BLOCK_IO_MEDIA` mirror. Cite:
+  `MdePkg/Include/Protocol/BlockIo.h` (edk2.git stable/202408)
+  lines 15..18 (GUID), 128..200 (Media), 214..230 (protocol struct).
+- `uefiboard/block_io_protocol_tamago.go` — live `BlockIOMedia` /
+  `BlockIOReadBlocks` / `BlockIOWriteBlocks` / `BlockIOFlushBlocks`
+  thunks via the salvaged 5-arg `efiCall` (same `bs + offset`
+  idiom as M1.5).
+- `uefiboard/blkprintk.go` — `BlkRingBuffer` (32 KiB ring with
+  wrap, 16-byte header `(writeCount, payloadLen)`, monotonic
+  counter, auto-flush at 4 KiB). Host-buildable; 100 % unit-tested
+  including wrap, decode round-trip, and oversized-frame rejection.
+- `uefiboard/blkprintk_tamago.go` — `Flush` (calls
+  `BlockIOWriteBlocks` + `BlockIOFlushBlocks`) and `BlkPrintk(b)`
+  (per-byte append + sentinel-or-threshold auto-flush).
+- `uefiboard/board.go` — `printk` now mirrors to `BlkSink` when
+  non-nil; default `nil` preserves Phase-1 ConOut-only behaviour
+  bit-for-bit.
+- `phase2_blkprintk.go` — probe gated on `phase2_blkprintk`:
+  walks `EFI_BLOCK_IO_PROTOCOL` handles, reads LBA 0 of each
+  writable bare-disk, picks the first with the 16-byte
+  `BlkPrintkScratchMagic = "cloudboot-M1.6\0\0"`, binds the ring.
+- `phase2_dispatch.go` — extends the M1/M1.5 dispatcher to run
+  `runBlkPrintkSetup` BEFORE the PCI walk + SNP walk so the tee
+  captures both, and `runBlkPrintkTeardown` AFTER so the sentinel
+  flush lands the final frame.
+- `cmd/blkprintk-seed` — host CLI to pre-stage a scratch disk with
+  the magic marker. Required before the QEMU/VZ launch.
+- `cmd/blkprintk-recover` — host CLI to decode the scratch file
+  post-halt and print the recovered payload.
 
-- `uefiboard/block_io_protocol.go` — GUID
-  (`964E5B21-6459-11D2-8E39-00A0C969723B`), function-table
-  offsets (Revision / Media / Reset / ReadBlocks / WriteBlocks /
-  FlushBlocks), `EFI_BLOCK_IO_MEDIA` mirror.
-- `uefiboard/block_io_protocol_tamago.go` — live `BlockIOWrite`
-  thunk.
-- A buffered `RingPrintk` that captures the last 4 KiB of
-  probe output in a Go-side ring; on halt, writes the ring to LBA
-  0 of the first writable virtio-blk handle whose Media reports
-  `LogicalPartition == false` (the bare disk, not a partition).
-- Probe build tag `phase2_blockio_sink` that switches `Printk`
-  from ConOut to the ring-and-blockio sink at runtime when ConOut
-  is determined to be missing.
-- vfkit wiring: `--device virtio-blk,path=output.img` where
-  `output.img` is a host-side 1-MiB raw file. Post-halt, the host
-  reads LBA 0 with `dd if=output.img bs=512 count=8 | strings`
-  and confirms the banner / probe lines.
+Build target:
+`task blkprintk:all` → `BOOTX64-BLKPRINT.EFI`,
+`BOOTAA64-BLKPRINT.EFI`, `BOOTRISCV64-BLKPRINT.EFI`,
+`BOOTLOONGARCH64-BLKPRINT.EFI`.
 
-Acceptance: vfkit run prints the probe's expected banner +
-PCI/SNP enumeration to `output.img`. R-M1'a CLOSED.
+Launch protocol (vfkit example):
 
-If Block IO doesn't work (e.g., VZ refuses writes from a UEFI
-loader pre-EBS), the next fallback is to **implement a virtio-
-console driver in the probe** — but virtio-console is more
-complex than virtio-blk's request-response shape, so M1.6 prefers
-Block IO first.
+```sh
+go run ./cmd/blkprintk-seed -out scratch.img -size-mib 1
+# stage esp.img with BOOTAA64.EFI = the BLKPRINT EFI
+vfkit --memory 2048 \
+  --bootloader efi,variable-store=nvram.fd,create \
+  --device virtio-blk,path=esp.img \
+  --device virtio-blk,path=scratch.img \
+  --device virtio-net,nat,mac=52:54:00:01:02:03 \
+  --device virtio-serial,logFilePath=vm.log
+# after halt:
+go run ./cmd/blkprintk-recover -in scratch.img
+```
+
+**Magic-marker safety.** The probe never writes to the ESP
+(boot disk) on any hypervisor, because the host pre-stages the
+sentinel `"cloudboot-M1.6\0\0"` ONLY on the dedicated scratch
+image. Any other writable bare-disk handle the firmware exposes
+(typically the ESP image when the ISO is also a virtio-blk drive)
+fails the magic check and is skipped. The protection is
+unconditional — bypassing it requires explicit host action to
+write the magic to a non-scratch disk.
+
+Acceptance gate met on all 4 QEMU+EDK2 arches AND on Apple VZ via
+vfkit 0.6.3 (arm64-only on this Mac). R-M1'a CLOSED with full
+capability matrix; see §5.
 
 ### M2 — virtio-net init + virtqueues + send/recv one frame
+
+**Pre-M2 path-choice surfaced by M1.6.** The full per-hypervisor /
+per-arch capability matrix is now known (see §5 R-M1'a M1.6
+findings + R-M1.5x). Summary:
+
+|  hypervisor / arch       |  PCI IO  |   SNP   |
+| ------------------------ | :------: | :-----: |
+| QEMU+EDK2 amd64          |    yes   |   yes   |
+| QEMU+EDK2 arm64          |    yes   |   yes   |
+| QEMU+EDK2 loong64        |    yes   |   yes   |
+| QEMU+EDK2 riscv64        |  NO\*    |   yes   |
+| Apple VZ (vfkit) arm64   |    yes   |   NO    |
+
+\* riscv64 EDK2's PciBus driver binds the root bridge but not
+virtio-net; see R-M1.5x.
+
+Three candidate M2 directions, each with different LOC + per-arch
+support shape:
+
+**Path Y (virtio-net pure-Go via PCI IO, the original plan).**
+~3000 LOC: feature negotiation, virtqueue alloc, RX / TX, MAC
+read via `PciIo.Mem.Read` against BAR0+DeviceCfg offset.
+Works on 4 of 5 cells in the matrix (everything except QEMU
+riscv64). Requires a riscv64 fallback (Path Y' or an EDK2
+upstream patch to bind virtio-net to PCI IO).
+
+**Path Y' (SNP-first).** ~300 LOC: wrap the firmware's
+`EFI_SIMPLE_NETWORK_PROTOCOL.Transmit` / `Receive` as a Go
+`LinkEndpoint`. Works on 4 of 5 cells (everything except Apple
+VZ). Apple VZ doesn't publish SNP, so this path CANNOT cover VZ
+on its own.
+
+**Path Y'' (both, with runtime detection).** Implement Path Y as
+the primary path; fall back to Path Y' on hypervisors that fail
+to surface virtio-net through PCI IO (riscv64 EDK2). The runtime
+chooser is small (handle-set intersection at probe time).
+Covers all 5 cells. Cost: Y + Y' = ~3300 LOC + ~50 LOC chooser.
+
+**Recommendation surfaced, not chosen.** The trade-off is:
+
+- **Path Y alone**: leaves riscv64 unsupported (or dependent on
+  an EDK2 upstream patch we'd own). 1 LOC line.
+- **Path Y' alone**: leaves Apple VZ unsupported. Not viable;
+  VZ is a primary target.
+- **Path Y'' (both)**: full coverage; ~10 % more code than Y
+  alone; matches the design's "no per-hypervisor codepath
+  splits at the user-visible API" intent.
+
+The user picks: Y''-first feels like the natural choice given that
+VZ support is non-negotiable and Y' is small. Recording here for
+the M2 milestone owner.
 
 **Deliverable.** A pure-Go virtio-net driver capable of sending one
 ARP request and receiving the reply. No TCP/IP stack yet — just raw
@@ -390,6 +475,12 @@ Risks:
 - IRQ vs. polling. M2 polls the used-ring index (firmware doesn't
   give us an EFI_EVENT for virtio-net out of the box). Polling cost
   is acceptable for a one-time fetch.
+- **R-M1.6a (NEW, LOW)** — VZ's virtio-net device-cfg `length=17`
+  is shorter than QEMU's. Sanity-check the field offsets match
+  the modern virtio-net spec exactly (UEFI 2.10 + Virtio 1.1
+  §5.1.4) before reading MAC; a longer config layout on QEMU is
+  forward-compatible but a shorter one on VZ would surface a
+  bounds-check we don't currently do.
 
 Acceptance: an ARP request emitted by our driver gets an ARP reply
 visible in our RX ring on QEMU+EDK2 (any arch) and on vfkit (arm64).
@@ -547,7 +638,7 @@ M4 → M8 for EBS handoff) but the substance of each gate is the same.
 
 ## 5. Risks
 
-### R-M1'a (HIGH, this milestone) — Does VZ expose `EFI_PCI_IO_PROTOCOL` for virtio-net?
+### R-M1'a (RESOLVED 2026-06-07 M1.6) — VZ capability matrix surfaced via Block IO side-channel
 
 The whole Path Y plan rests on UEFI exposing per-controller PCI IO
 handles for the platform's virtio devices. On EDK2 (QEMU + OVMF /
@@ -631,6 +722,53 @@ The VZ-side M1 acceptance gate (vfkit reports virtio-net MAC) is
 therefore **still inconclusive** as of M1.5. R-M1'a is held over
 to M1.6, which lands the Block IO side-channel as the
 observability mechanism.
+
+**M1.6 resolution (2026-06-07).** The Block-IO side-channel
+(see §3 M1.6) WORKS on Apple VZ — vfkit 0.6.3 exposes a writable
+virtio-blk via `EFI_BLOCK_IO_PROTOCOL`, `WriteBlocks` succeeds,
+`FlushBlocks` commits the data, and the post-halt scratch file
+matches the probe's captured ConOut text exactly. The recovered
+output reveals VZ's protocol coverage:
+
+**VZ (vfkit 0.6.3) capability matrix on arm64:**
+
+|  protocol                            | published?  | notes |
+| ------------------------------------ | :---------: | ----- |
+| `EFI_BLOCK_IO_PROTOCOL`              | **YES**     | 2+ handles (ESP, scratch); writes commit; closes R-M1'a. |
+| `EFI_PCI_IO_PROTOCOL`                | **YES**     | 5 handles: Apple host bridge (0x106b:0x1a05), virtio-net (0x1af4:0x1041 — **modern**, not legacy), virtio-rng (0x1043), virtio-blk x2 (0x1042). |
+| `EFI_SIMPLE_NETWORK_PROTOCOL`        | **NO**      | `LocateHandleBuffer` returns `EFI_NOT_FOUND` (0x800...0e). VZ firmware does not bind SNP to its virtio-net. |
+| ConOut → `virtio-serial,logFilePath` | **NO**      | Log file stays at 0 bytes. Same on `stdio` / `pty` (vfkit errors out). |
+
+**Recovered probe output** (excerpt from scratch.img after vfkit
+run; full text in the M1.6 commit body):
+
+```
+phase2-pcienum: handles= 5
+phase2-pcienum: handle 1 = ...
+phase2-pcienum:   VID:DID = 0x1af4 : 0x1041 Class = 0x02/0x00/0x00 Rev = 0x01
+phase2-pcienum:   --> VIRTIO device (vendor 0x1AF4)
+phase2-pcienum:     CapList pointer = 0x40
+phase2-pcienum:     cap 0 type= CommonCfg BAR= 0 offset= 0      length= 56
+phase2-pcienum:     cap 1 type= ISRCfg    BAR= 0 offset= 4096   length= 1
+phase2-pcienum:     cap 2 type= NotifyCfg BAR= 0 offset= 16384  length= 8
+phase2-pcienum:     cap 3 type= DeviceCfg BAR= 0 offset= 32768  length= 17
+phase2-pcienum: done. virtio-net devices found = 1
+phase2-snpenum: LocateHandleBuffer FAILED: EFI_STATUS=0x800000000000000e
+```
+
+**Implication for Path Y.** On Apple VZ, the M2 pure-Go virtio-net
+init path **is viable** via PCI IO — virtio-net is a modern (1.0+)
+device, exposed through standard `EFI_PCI_IO_PROTOCOL`, with the
+four spec-mandated virtio capabilities (CommonCfg, ISRCfg,
+NotifyCfg, DeviceCfg) present and BAR-mapped. The MAC read is M2
+work (needs `PciIo.Mem.Read` against BAR0+32768), unchanged from
+the M1 design.
+
+**Implication for an SNP-first prod implementation.** A
+Path-Y'-only (SNP-first) implementation is **NOT a viable
+single-path solution** because VZ doesn't publish SNP. To support
+VZ at all, Path Y (pure-Go virtio-net) is required somewhere in
+the implementation. See §3 M2 path-choice discussion.
 
 ### R-M1'b (RESOLVED 2026-06-07 M1.5) — Per-arch HandleProtocol divergence
 
@@ -811,11 +949,15 @@ Per milestone, revisit at the start of the M-N agent run.
 
 ### M1 (Path Y — virtio-net device discovery)
 
-- Does VZ publish `EFI_PCI_IO_PROTOCOL` handles? See R-M1'a. Probe
-  answers this in the M1 run.
+- ~~Does VZ publish `EFI_PCI_IO_PROTOCOL` handles? See R-M1'a.
+  Probe answers this in the M1 run.~~ **Resolved 2026-06-07
+  (M1.6)**: VZ vfkit 0.6.3 publishes 5 PCI IO handles including
+  a modern virtio-net (0x1af4:0x1041) with all 4 standard virtio
+  caps. SNP NOT published.
 - Legacy (DID 0x1000) vs modern (DID 0x1041) virtio-net: QEMU+EDK2
-  exposes both depending on `-device` qualifier. VZ is expected to
-  expose modern only. Probe prints both DIDs to be sure.
+  exposes both depending on `-device` qualifier. ~~VZ is expected
+  to expose modern only.~~ **Confirmed (M1.6)**: VZ exposes the
+  modern variant (DID 0x1041, Rev 0x01).
 - IPv6: Phase 2 ships v4-only. Track v6 as a follow-up.
 
 ### M2 (virtio-net init + queues)
@@ -940,3 +1082,40 @@ Per milestone, revisit at the start of the M-N agent run.
   what would otherwise have been M2/M3 virtqueue infrastructure.
   Host go test ./uefiboard/... + phase2 helpers PASS;
   coverage 96.5% maintained.
+- **2026-06-07** (M1.6): R-M1'a RESOLVED. Block-IO side-channel
+  shipped: `EFI_BLOCK_IO_PROTOCOL` bindings + GUID +
+  `EFI_BLOCK_IO_MEDIA` mirror in `uefiboard/block_io_protocol.go`
+  (cite `MdePkg/Include/Protocol/BlockIo.h` edk2.git stable/202408
+  lines 15..18, 128..200, 214..230); live ReadBlocks /
+  WriteBlocks / FlushBlocks thunks in
+  `block_io_protocol_tamago.go`; 32 KiB ring buffer with
+  monotonic write counter + auto-flush in `blkprintk.go`; tee
+  through `printk` in `board.go` gated on a nil-default
+  `BlkSink` so Phase-1 / M0 / M1 / M1.5 behaviour is preserved
+  bit-for-bit. Probe binary `BOOT<arch>-BLKPRINT.EFI` built
+  via `task blkprintk:all` runs the M1.5 pcienum+snpenum walks
+  inside the tee. Magic-marker `cloudboot-M1.6\0\0` at LBA 0
+  of the scratch disk identifies the dedicated scratch image
+  unambiguously so the probe never clobbers the ESP. Host CLIs
+  `cmd/blkprintk-seed` (pre-stage) + `cmd/blkprintk-recover`
+  (post-halt decode) ship with the probe. All 4 QEMU+EDK2
+  arches PASS the Block-IO side-channel; ConOut output bytes
+  match the disk-recovered payload exactly. **Apple VZ vfkit
+  0.6.3 (arm64): side-channel WORKS end-to-end** —
+  `virtio-serial,logFilePath` stays at 0 bytes (R-M1'a's
+  original symptom) but the scratch disk recovers the full
+  probe output. VZ capability matrix recovered: 5
+  `EFI_PCI_IO_PROTOCOL` handles (Apple host bridge, modern
+  virtio-net 0x1041, virtio-rng, 2× virtio-blk); virtio-net
+  device-cfg locator BAR0+32768 with the 4 standard virtio caps
+  (CommonCfg/ISRCfg/NotifyCfg/DeviceCfg); `EFI_SIMPLE_NETWORK_
+  PROTOCOL` NOT published (LocateHandleBuffer returns
+  EFI_NOT_FOUND = 0x800...000e). Implication: Apple VZ
+  supports Path Y (pure-Go virtio-net via PCI IO) but NOT
+  Path Y' (SNP-first); a Path-Y'-only prod implementation
+  cannot cover VZ. M2 direction surfaced (§3 M2):
+  Path Y'' (both) recommended for full coverage, ~3300 LOC
+  + ~50 LOC chooser. Path-choice deferred to user. Host
+  `go test ./uefiboard/... ./cmd/...` PASS;
+  uefiboard coverage 98.0 % (up from 96.5 %),
+  blkprintk-seed 80.0 %, blkprintk-recover 91.7 %.
