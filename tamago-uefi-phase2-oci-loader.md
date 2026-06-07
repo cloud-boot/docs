@@ -890,6 +890,17 @@ gvisor and write a minimal pure-Go IPv4 + TCP + UDP stack ourselves
 (scope: ARP, IPv4 send/recv, UDP for DHCP+DNS, TCP for HTTP). This
 is a few weeks of work — preferred over Path X relapse.
 
+**Pre-flight finding (2026-06-07, during M2 wait):** gvisor master
+at `v0.0.0-20260605212926-cfb7c0629521` does **not** build under
+host `go build ./...` because `pkg/tcpip/stack/bridge_test.go`
+declares `package bridge_test` while no `package bridge` source
+exists in the same directory — Go rejects the mixed-package layout.
+This is an upstream gvisor issue at HEAD, not a TamaGo-specific one.
+M3 Step 0 must pin gvisor to a known-good tag (try
+`release-202?????.0` series, or the last commit before
+`bridge_test.go` landed) before any `GOOS=tamago` build attempt.
+Recorded by pre-flight host-side `go build` probe.
+
 ### R-M0 (resolved) — `GetMemoryMap` quirks + riscv64 NULL-deref
 
 Two facets, both resolved in the M0+salvage commits:
