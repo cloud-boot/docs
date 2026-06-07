@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0 done)
+status: design / in-progress (M0 done; Path Y M1 in flight)
 last-updated: 2026-06-07
 ---
 
@@ -37,79 +37,138 @@ not applicable; path C remains the production target there.
 Phase 2 ships one EFI application; `cloud-boot/iso` keeps packing it the
 same way it packs Phase 1's `BOOT<ARCH>.EFI`.
 
-## 2. Architectural decision: Path X (UEFI Boot Services) vs Path Y (pure-Go stack)
+## 2. Architectural pivot — Path X abandoned, Path Y adopted (2026-06-07)
 
-We faced a binary choice for *how to do networking* before
-`ExitBootServices`:
+We initially designed Phase 2 around **Path X**: drive
+`EFI_DHCP4_PROTOCOL`, `EFI_DNS4_PROTOCOL`, `EFI_HTTP_PROTOCOL`,
+`EFI_TLS_PROTOCOL`, and `EFI_TCP4_PROTOCOL` directly from our pure-Go
+EFI app and reuse the EDK2 NetworkPkg stack. M0 landed against that
+plan; M1 work started; the alternative — **Path Y**, a pure-Go virtio-net
++ TCP/IP + TLS + HTTP stack — was treated as a fallback.
 
-- **Path X — UEFI Boot Service protocols.** Drive
-  `EFI_DHCP4_PROTOCOL`, `EFI_DNS4_PROTOCOL`,
-  `EFI_HTTP_PROTOCOL`, `EFI_TLS_PROTOCOL`,
-  `EFI_TCP4_PROTOCOL`, `EFI_MANAGED_NETWORK_PROTOCOL` (all pre-EBS,
-  exposed by firmware), and reuse the well-tested NIC drivers and TCP/IP
-  stack that EDK2 already runs (`MdeModulePkg/Universal/Network/*`,
-  `NetworkPkg/HttpDxe`, `NetworkPkg/TlsDxe`).
+**The pivot.** Path X cannot meet the cross-hypervisor requirement.
+Apple VZ firmware does NOT expose the UEFI network protocols
+(`EFI_HTTP_PROTOCOL`, `EFI_DHCP4_PROTOCOL`, `EFI_DNS4_PROTOCOL`,
+`EFI_TCP4_PROTOCOL`, `EFI_TLS_PROTOCOL` — none of them have published
+handles). This is documented in
+[`docs/tutorials/vfkit.md`](docs/tutorials/vfkit.md) lines 17-19:
 
-- **Path Y — Pure-Go virtio-net + `net/http` over a custom stack.**
-  Write a virtio-net driver in pure Go, plumb it into a Go TCP/IP stack
-  (e.g. `gvisor.dev/gvisor/pkg/tcpip`), use `crypto/tls` + `net/http`
-  for the fetch, then ExitBootServices and hand off.
+```text
+VZ firmware has no HTTP/TCP/DHCP/DNS  →  Path B can't fetch plans
+                                          (the loader's networked phases
+                                          D–J were abandoned for VZ)
+```
 
-**Decision: Path X.**
+The same firmware-protocol gap that killed Path B's networked phases
+on VZ also kills Path X for shape A. We could ship Path X for
+QEMU+EDK2 only and tell every Apple Silicon user "use shape C
+instead", but that splits the multi-hypervisor contract that motivated
+shape A in the first place. So we pivot.
+
+**Decision: Path Y (pure-Go networking).** Final stack:
+
+```text
++-----------------------------------------------------------------+
+|  Pure-Go OCI client (M7)                                        |
++-----------------------------------------------------------------+
+|  Pure-Go HTTPS  (net/http + crypto/tls, stdlib, M5+M6)          |
++-----------------------------------------------------------------+
+|  Pure-Go DNS resolver  (M5)                                     |
++-----------------------------------------------------------------+
+|  Pure-Go DHCPv4 client  (M4)                                    |
++-----------------------------------------------------------------+
+|  gvisor.dev/gvisor/pkg/tcpip  (LinkEndpoint, M3)                |
++-----------------------------------------------------------------+
+|  Pure-Go virtio-net driver  (M1 discovery, M2 init+TX/RX)       |
++-----------------------------------------------------------------+
+|  UEFI Boot Services — used ONLY for:                            |
+|    * PCI IO enumeration (EFI_PCI_IO_PROTOCOL, M1)               |
+|    * Memory allocation (already wired)                          |
+|    * ExitBootServices + handoff (M8)                            |
++-----------------------------------------------------------------+
+```
 
 Rationale:
 
-- **Shape A only needs network *pre-EBS*.** Once we hand off to the
-  Linux kernel, Linux sets up its own NIC drivers and its own network.
-  We don't need to "carry" a Go-side network stack past EBS, so the
-  fact that UEFI protocols cease to exist after `ExitBootServices`
-  doesn't matter — we will have called EBS and jumped to Linux *seconds*
-  after the HTTP fetch returns.
-- **Reuse vs. reimplement.** EDK2's `NetworkPkg` has been in production
-  on every major UEFI platform for a decade. A virtio-net + TCP/IP +
-  TLS stack in pure Go is *months* of work to bring to feature parity
-  with EDK2's stack on transient packet loss, MTU discovery, and TLS
-  1.3 interop. We get all of that for free by reusing the firmware's
-  code paths via well-defined Boot Service handles.
-- **Smaller attack surface in our binary.** The Go binary needs only the
-  UEFI protocol wrappers + an OCI client. The TCP/IP and TLS code lives
-  in firmware and gets the platform's security-fix lifecycle.
-- **Multi-arch parity.** On amd64 / arm64 / riscv64 / loong64, the
-  Network Stack Modules in EDK2 are the same code; we don't need to port
-  a virtio-net driver per arch. On hardware NICs (Intel, Mellanox, etc.)
-  EDK2's UNDI / SNP layer plus the platform's option ROM cover what we
-  cannot.
+- **Autonomy.** No dependence on the firmware exposing a network
+  protocol family that VZ (and likely other minimal-firmware
+  hypervisors) doesn't ship. The only firmware service we still rely
+  on is the low-level PCI device enumeration — much harder for a
+  firmware to omit since the EFI loader itself needs it.
+- **Decoupling from host.** The Go-side stack lives in our binary,
+  versioned with our binary, with our security-fix lifecycle. We no
+  longer inherit the EDK2 NetworkPkg's release cadence (which is
+  multi-month and varies per hypervisor build).
+- **Reusability beyond boot.** A pure-Go virtio-net + netstack is
+  useful in `cloud-boot/init` (post-handoff initramfs work),
+  `cloud-boot/uki` (UKI-time validation), and any other CGO-free TamaGo
+  binary cloud-boot ships. Path X's firmware-protocol wrappers are
+  scrap once we ExitBootServices.
+- **Alignment with project doctrine.** cloud-boot's HARD RULES require
+  pure Go, no CGO, no vendoring, building from source. A pure-Go
+  netstack is the only direction consistent with that.
 
-Costs / risks we accept:
+Costs we accept:
 
-- We are **vulnerable to firmware variability**: EDK2 may ship without
-  `NetworkPkg` configured in. Some downstreams (Coreboot+Tianocore,
-  certain server BMCs) strip it. We *cannot* run shape A there. **This
-  is acceptable** — those platforms either run path C (path C runs from
-  Linux, not from UEFI, so the firmware's protocol coverage is moot) or
-  the operator is told *up-front* "shape A needs UEFI HTTP, your
-  firmware doesn't expose it, use shape C".
-- We pay one indirect call per UEFI service invocation, with a stack
-  switch and ABI translation in `eficall_<arch>.s`. Phase 1 already
-  pays this cost per ConOut print and it is invisible.
-- **Path Y as a fallback for TLS only**, on platforms whose
-  `EFI_TLS_PROTOCOL` is missing or broken: see M2 risks below.
+- **Implementation cost.** We re-implement what EDK2 NetworkPkg
+  already does, on top of a pure-Go netstack. gvisor/netstack is
+  production-grade (it runs gVisor sandbox traffic in Google
+  production) but is not trivial to bring up under TamaGo. M2-M3 are
+  the highest-risk milestones now (was M2 TLS under Path X).
+- **Binary size.** A pure-Go HTTPS stack + netstack is several MB
+  bigger than the Path X wrappers. Acceptable: we're well under the
+  EFI image size limits of every firmware we target.
+- **CPU cost on the bootstrap.** Software TCP + TLS handshake on a
+  single core. Acceptable for a one-time fetch of kernel+initrd.
 
-Upstream references (read before writing M1+ code):
+What we keep from the M0..M1 Path X work (salvaged in the M1-prep
+commit):
 
-- UEFI 2.10 spec, §29 (HTTP Boot), §28 (TLS Protocol),
-  §27 (Network Protocols).
+- `efiCall` widened from 4 to 5 args across all four arches. Still
+  needed for `LoadImage` (6 args) at M8 and for `EFI_PCI_IO_PROTOCOL`'s
+  config-space accessors at M1.
+- `memorymap_tamago.go` NULL-DescriptorVersion fix (R-M0a resolved).
+- `efi_events.go` / `efi_events_tamago.go` — async-event plumbing,
+  still useful for any `LoadImage`-style 5+-arg path.
+- `protocols_tamago.go` — `LocateHandleBuffer` / `HandleProtocol` /
+  `LocateProtocol` / service-binding `CreateChild` / `DestroyChild`.
+  Used by M1 to walk every controller publishing `EFI_PCI_IO_PROTOCOL`.
+
+What we drop:
+
+- All `EFI_HTTP_PROTOCOL` / `EFI_DHCP4_PROTOCOL` / `EFI_DNS4_PROTOCOL`
+  call-site bindings. `http_protocol.go` reverts to its M0 type
+  surface (kept only because M5+ might use the spec'd GUID for
+  diagnostic comparison; we will not call into the firmware HTTP).
+- The Path X risk discussion (R-M2 TLS variability, R-M1 DHCP rebinding
+  through `EFI_DHCP4_PROTOCOL`) — replaced by Path Y risks below.
+
+Upstream references for the new direction (read before writing M1+
+code):
+
+- UEFI 2.10 spec, §13 (Protocols — PCI Bus Support).
 - `edk2.git`:
-  - `MdePkg/Include/Protocol/Http.h`
-  - `MdePkg/Include/Protocol/Tls.h`
-  - `MdePkg/Include/Protocol/Dhcp4.h`
-  - `MdePkg/Include/Protocol/Dns4.h`
-  - `NetworkPkg/HttpDxe/HttpImpl.c` (request/response state machine)
-  - `NetworkPkg/TlsDxe/TlsImpl.c` (cipher suite negotiation, cert chain)
-  - `MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c` (LoadImage usage)
-  - `MdePkg/Include/Uefi/UefiSpec.h` (`EFI_BOOT_SERVICES`,
-    `ExitBootServices`, `GetMemoryMap`).
-- For the kernel handoff per arch:
+  - `MdePkg/Include/Protocol/PciIo.h` (the `EFI_PCI_IO_PROTOCOL`
+    function table, GUID, Pci/Mem/Io accessor unions, BAR
+    attributes).
+  - `MdePkg/Include/Uefi/UefiSpec.h` for `EFI_BOOT_SERVICES`
+    offsets we already use.
+  - `OvmfPkg/VirtioNetDxe/VirtioNet.h` and
+    `OvmfPkg/VirtioNetDxe/VirtioNetInitRing.c` — EDK2's own virtio-net
+    driver. Pattern reference for capability walk / queue init / MAC
+    read; NOT a code copy.
+- Virtio 1.1 spec (committee specification 01, 2019-04-11):
+  - §4.1 "Virtio Over PCI Bus" — modern device layout, capability
+    discovery via PCI cap list, the five VIRTIO_PCI_CAP_* kinds, BAR
+    + offset addressing of the common/notify/ISR/device/PCI-cfg
+    capabilities.
+  - §5.1 "Network Device" — virtio-net device-specific config
+    (MAC[6], status, max_virtqueue_pairs) and feature bits.
+- For the gvisor netstack adapter at M3:
+  - `gvisor.dev/gvisor/pkg/tcpip/stack` (`LinkEndpoint` interface).
+  - `gvisor.dev/gvisor/pkg/tcpip/link/channel` (reference adapter
+    pattern; ours is simpler — single virtio-net device).
+- For the kernel handoff per arch (unchanged from the Path X plan):
   - amd64: `Documentation/arch/x86/boot.rst` (kernel boot protocol)
     and Linux EFI stub semantics.
   - arm64: `Documentation/arch/arm64/booting.rst`,
@@ -122,136 +181,241 @@ Upstream references (read before writing M1+ code):
     handoff (`LINUX_EFI_INITRD_MEDIA_GUID`) — the same protocol
     `cloud-boot/loader` already publishes on path B.
 
-## 3. Milestones M0 → M4
+## 3. Milestones M0 → M8 (Path Y)
 
 Each milestone is a separate agent run with its own scaffolding +
-tests + commit. M0 introduces the type surface but no live calls (beyond
-`GetMemoryMap` for the probe); M1..M4 wire one Boot Service family at a
-time.
+tests + commit. M0 introduced the type surface and the
+`GetMemoryMap` probe; M1..M8 build the Path Y stack one layer at a
+time, from PCI device discovery up to Linux kernel handoff.
 
-### M0 — Probe + type surface (this milestone)
+### M0 — Probe + type surface (done)
 
-**Done in this PR.**
-
-Deliverables:
+Deliverables (shipped in
+[5b5573c](https://github.com/cloud-boot/tamago-uefi/commit/5b5573c) +
+salvaged in
+[cfa6dca](https://github.com/cloud-boot/tamago-uefi/commit/cfa6dca)):
 
 - `uefiboard/ebs.go` — `ExitBootServices(mapKey uintptr) error` thunk.
-  Not called from the Phase-1 main flow.
-- `uefiboard/memorymap.go` — `MemoryDescriptor` struct + `GetMemoryMap()
-  ([]MemoryDescriptor, uintptr, error)` wrapper around
-  `gBS->GetMemoryMap`.
-- `uefiboard/http_protocol.go` — GUIDs and struct shapes for the UEFI
-  HTTP protocol family (`EFI_HTTP_SERVICE_BINDING_PROTOCOL_GUID`,
-  `EFI_HTTP_PROTOCOL_GUID`, `EFI_HTTP_REQUEST_DATA`,
-  `EFI_HTTP_RESPONSE_DATA`, `EFI_HTTP_MESSAGE`, `EFI_HTTP_TOKEN`,
-  `EFI_HTTP_CONFIG_DATA`). No methods yet.
-- `--phase2-probe` flag (or `phase2_probe` build tag) in `main.go`
-  that calls `GetMemoryMap`, prints a summary (descriptor count + RAM
-  totals by memory type) to ConOut, halts. Phase 1 banner remains the
-  default behaviour.
-- Tests covering ≥80% of `memorymap.go` (parser fed a synthetic buffer)
-  and round-trip GUID byte-layout assertions for `http_protocol.go`.
-- This design doc, committed to `cloud-boot/docs`.
+- `uefiboard/memorymap.go` + `memorymap_tamago.go` —
+  `GetMemoryMap()`, with the post-salvage 5-arg form passing a real
+  `*uint32` DescriptorVersion (resolves R-M0a riscv64 fault).
+- `uefiboard/http_protocol.go` — GUIDs + struct shapes for the EFI HTTP
+  family. Retained as M0 type surface only; Path Y does NOT call into
+  firmware HTTP.
+- `phase2_probe` build tag → `GetMemoryMap` smoke test. Phase 1
+  banner remains the default behaviour.
 
-Acceptance: Phase 1 regression (`task test:multiarch:boot` in
-`cloud-boot/iso`) still PASS, host `go test ./uefiboard/...` PASS,
-all four `BOOT<ARCH>.EFI` files still link.
+Acceptance (re-validated after the salvage): host `go test
+./uefiboard/...` PASS, `task elf:*` + `task probe:elf:*` link on all
+four arches.
 
-### M1 — DHCP4 + HTTP fetch (no TLS yet)
+### M1 — virtio-net device discovery + identity (this milestone)
 
-Deliverables:
+**Deliverable.** `EFI_PCI_IO_PROTOCOL` bindings + a probe binary
+(`phase2_pcienum` build tag) that walks every controller publishing
+the protocol, reports VID/DID/Class/Subsystem/(Seg,Bus,Dev,Fn) for
+each, identifies virtio devices (vendor 0x1AF4), walks their virtio
+PCI capability list, and for virtio-net devices (DID 0x1000 legacy
+or 0x1041 modern) reads and prints the MAC address from the
+device-specific config.
 
-- `uefiboard/dhcp4_protocol.go` — Service binding handle acquisition,
-  config, run-to-completion. Yields an IPv4 address, subnet mask,
-  router list, DNS server list.
-- `uefiboard/dns4_protocol.go` — resolve a configured registry hostname
-  to an IPv4. (Optional in M1 if the test target uses an IP literal.)
-- `uefiboard/http_client.go` — minimal Go-side wrapper over the M0
-  `http_protocol.go` types: `Get(url string) (*Response, error)` using
-  the firmware's `EFI_HTTP_PROTOCOL`. Plaintext HTTP only.
-- A `--phase2-fetch http://...` flag that fetches a URL and prints
-  the response body length + first 64 bytes. No OCI yet, no TLS.
+Scope:
 
-Acceptance: on QEMU/OVMF with the `user` networking back-end, the
-amd64 image fetches an HTTP URL served by a host-side `python -m
-http.server`. arm64 + riscv64 + loong64 either repro the fetch or
-report a clean "EFI_HTTP_PROTOCOL not available on this firmware",
-which gates a Risk-section finding in this doc.
+- `uefiboard/pci_io_protocol.go` — `EFI_PCI_IO_PROTOCOL_GUID`
+  (`4cf5b200-68b8-4ca5-9eec-b23e3f50029a`) and the protocol function
+  table. M1 uses `Pci.Read` / `Pci.Write` (config-space access),
+  `GetLocation`, `Attributes`, `GetBarAttributes`. The IO / Mem /
+  Map / Unmap accessors are stubbed at the type-surface level only;
+  M2 wires them.
+- `uefiboard/virtio_pci.go` — virtio PCI constants (vendor 0x1AF4,
+  legacy DID 0x1000, modern DID 0x1041 for net), the five
+  `VIRTIO_PCI_CAP_*` kinds (common / notify / ISR / device / PCI
+  config), and a pure host-buildable capability-list walker.
+- `phase2_pcienum.go` + `phase2_pcienum_stub.go` (build tag
+  `phase2_pcienum`, mirrors the `phase2_probe` shape).
 
-### M2 — TLS + HTTPS (highest-risk milestone)
+Risk this milestone validates:
 
-Deliverables:
+- **R-M1'a** (new) — Does Apple VZ firmware publish
+  `EFI_PCI_IO_PROTOCOL` handles for its virtio-net devices? If not,
+  Path Y itself is in danger; we'd need to walk
+  `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL` directly or use an entirely
+  different enumeration path. **The M1 acceptance gate is: vfkit
+  surfaces at least one virtio-net device with a non-zero MAC.**
 
-- `uefiboard/tls_protocol.go` — `EFI_TLS_PROTOCOL` wrapper.
-- Wire `EFI_HTTP_CONFIG_DATA.HttpVersion = EFI_HTTPVERSION_1_1` +
-  TLS configuration; verify a single embedded root certificate.
-- `--phase2-fetch https://...` reachable.
+Acceptance: probe prints "virtio-net 1AF4:1040 or 1AF4:1041 BAR4@…
+MAC=…" on QEMU+EDK2 for all four arches, and on Apple VZ via vfkit
+(arm64 only — Mac Apple Silicon host).
 
-**Risk (see §5):** UEFI TLS is the wobbliest part of the spec across
-firmware versions. The fallback plan is in §5.
+### M2 — virtio-net init + virtqueues + send/recv one frame
 
-### M3 — OCI registry client
+**Deliverable.** A pure-Go virtio-net driver capable of sending one
+ARP request and receiving the reply. No TCP/IP stack yet — just raw
+Ethernet frame in / frame out over the virtio rings.
 
-Deliverables:
+Scope:
 
-- `uefiboard/oci_client.go` — minimal OCI distribution-spec v1.1
-  client (manifest fetch, blob fetch, multi-arch index resolution).
-- Content-Digest verification (`sha256:...`) on every blob.
-- Signature verification (cosign-compatible bundle signature over
-  the manifest digest; embedded public key).
-- `--phase2-pull oci://registry/repo:tag` flag that downloads a
-  manifest, walks blobs, and stages each in firmware-allocated memory.
-  Layout the descriptors needed for M4 handoff.
+- Feature negotiation against the virtio-net device (VERSION_1, MAC,
+  STATUS, MRG_RXBUF as a minimum).
+- `EFI_PCI_IO_PROTOCOL.Mem.Read/Write` for BAR-mapped MMIO config.
+- Virtqueue allocation (split-ring layout, 1.1 spec §2.6). Two
+  queues: RX[0] and TX[1]. Indirect descriptors deferred.
+- A blocking `SendFrame([]byte) error` and `RecvFrame() ([]byte,
+  error)`.
+- Memory: allocate ring buffers via
+  `gBS->AllocatePages(EfiBootServicesData)`; lifetime ends at
+  ExitBootServices.
 
-Acceptance: a UKI-style artifact (one config + two blobs:
-`vmlinuz`, `initrd`) round-trips manifest → blobs → in-memory.
+Risks:
 
-### M4 — Post-EBS memory + per-arch Linux handoff
+- Cache coherency on arm64 / riscv64 / loong64 when DMA-style writes
+  cross between firmware and our Go-side ring buffers. UEFI requires
+  the firmware-allocated memory to be cache-coherent for boot-services
+  use; we don't add barriers, we lean on that.
+- IRQ vs. polling. M2 polls the used-ring index (firmware doesn't
+  give us an EFI_EVENT for virtio-net out of the box). Polling cost
+  is acceptable for a one-time fetch.
 
-Deliverables:
+Acceptance: an ARP request emitted by our driver gets an ARP reply
+visible in our RX ring on QEMU+EDK2 (any arch) and on vfkit (arm64).
 
-- `uefiboard/handoff_<arch>.s` — per-arch kernel entry shim. Linux
-  EFI stub conventions:
-  - amd64: jump to `[kernel + 0x200]` (32-bit entry) with the
-    boot_params zero-page set up, or the 64-bit EFI handover entry
-    where present.
-  - arm64: `image_base + 0` is the entry; X0 = FDT or 0 (we use 0 to
-    fall through to EFI stub's runtime services lookup; with M4 we
-    will have called EBS so the stub takes the no-EFI path).
-  - riscv64: per the arch booting doc, a0 = hartid, a1 = device tree
-    or 0. We pass 0 and let the EFI stub fall back.
-  - loong64: image entry at offset 0; a0 = pointer to bootparams.
+### M3 — gvisor netstack `LinkEndpoint` + ARP + IPv4 + ICMP echo
+
+**Deliverable.** A `gvisor.dev/gvisor/pkg/tcpip/stack.LinkEndpoint`
+adapter wired to the M2 virtio-net driver, with an IPv4 stack
+configured for a static address. Acceptance gate: an ICMP echo to a
+known host returns a valid reply through the stack.
+
+Scope:
+
+- `go.mod` adds `gvisor.dev/gvisor` as a normal dependency (not
+  vendored — HARD RULE).
+- `uefiboard/netlink.go` — `LinkEndpoint` wrapper. Pure Go, no
+  unsafe beyond what gvisor itself uses.
+- Wire stack: `stack.New` with `ipv4.NewProtocol`,
+  `icmp.NewProtocol4`, attach the link endpoint, configure a static
+  IP on a NIC handle.
+- A `phase2_icmp` build tag → ICMP echo probe binary.
+
+Risks this milestone validates:
+
+- **R-M3'a** (new) — Does gvisor/netstack work under TamaGo? It uses
+  `unsafe.Pointer` arithmetic and `sync` primitives (mutexes, atomic
+  loads). TamaGo provides both, so this should work, but the gvisor
+  build has historically depended on package-init runtime hooks that
+  we should verify before committing to the dependency. **Acceptance
+  gate: stack initialises and ICMP round-trips on QEMU.**
+
+Acceptance: ICMP echo round-trips on QEMU+EDK2 (amd64 at minimum,
+arm64 strongly preferred) and on vfkit (arm64).
+
+### M4 — DHCPv4 client (pure Go)
+
+**Deliverable.** A pure-Go DHCPv4 client over the netstack. RFC
+2131. Acquires lease, parses options 1/3/6 (subnet, router,
+DNS), reconfigures the netstack with the assigned IP + gateway, and
+caches the DNS server list for M5.
+
+Scope:
+
+- `uefiboard/dhcp4.go` — pure Go DISCOVER / OFFER / REQUEST / ACK
+  state machine, raw-UDP socket on the netstack (server port 67 /
+  client port 68).
+- Lease refresh deferred (the boot lifetime is < 60 s, well within
+  lease times).
+
+Acceptance: on QEMU+EDK2 with `-netdev user`, the probe acquires a
+lease, prints the assigned IP, and the netstack can route ICMP
+through the assigned gateway. On vfkit with `--device
+virtio-net,nat`, same.
+
+### M5 — DNS + HTTP GET (Go stdlib over the stack)
+
+**Deliverable.** A plaintext HTTP/1.1 GET reaches a host-side
+`python -m http.server` over our stack, using `net/http` with a
+custom `Transport.DialContext` that resolves names through a pure-Go
+DNS client and dials through the gvisor netstack.
+
+Scope:
+
+- `uefiboard/dns.go` — pure Go DNS A-record resolver over UDP/53,
+  using the DHCP-obtained DNS server list.
+- `uefiboard/http_client.go` — `net/http.Client` configured with a
+  custom `Transport`. No firmware EFI_HTTP involvement.
+
+Risk: TamaGo's `net/http` import surface — needs the standard
+library to compile cleanly with `GOOS=tamago`. Pre-validate during
+the M5 agent run.
+
+Acceptance: probe fetches `http://10.0.2.2:8000/hello.txt`, prints
+status code + body length + first 64 bytes.
+
+### M6 — TLS + HTTPS GET
+
+**Deliverable.** `crypto/tls` over our netstack; HTTPS GET against a
+host-side server with a known self-signed cert pinned in our build.
+
+Scope:
+
+- One embedded CA cert (build-time constant). `tls.Config.RootCAs`
+  populated; `InsecureSkipVerify` MUST be false.
+- TLS 1.3 only.
+
+Acceptance: probe fetches `https://10.0.2.2:8443/hello.txt` and
+verifies status + body.
+
+### M7 — OCI registry client
+
+**Deliverable.** Minimal OCI distribution-spec v1.1 client. Manifest
+fetch, blob fetch (with `Content-Range`/`Range` support), multi-arch
+index resolution, content-digest verification on every byte, and
+cosign-bundle signature verification on the manifest digest.
+
+Scope:
+
+- Port the pure-Go OCI pieces already prototyped in
+  `cloud-boot/init` (do NOT modify that repo per task instruction —
+  copy the file shapes by hand if needed).
+- Embedded public key (build-time constant).
+
+Acceptance: a UKI-style artifact (config + vmlinuz + initrd blobs)
+round-trips manifest → blobs → in-memory.
+
+### M8 — Linux EFI-stub handover (post-EBS)
+
+**Deliverable.** Memory map → ExitBootServices → jump to the loaded
+Linux kernel, per-arch.
+
+Scope (same as the old Path X M4):
+
+- `uefiboard/handoff_<arch>.s` — per-arch kernel entry shim.
 - `uefiboard/initrd_protocol.go` — publish
-  `EFI_LOAD_FILE2_PROTOCOL` under `LINUX_EFI_INITRD_MEDIA_GUID` so the
-  EFI stub picks the initrd up the modern way (same shape
-  `cloud-boot/loader` uses).
-- Memory-map → `ExitBootServices` choreography:
-  1. `GetMemoryMap` → `mapKey`.
-  2. `ExitBootServices(imageHandle, mapKey)`.
-  3. If EBS returns `EFI_INVALID_PARAMETER`, refresh `GetMemoryMap` and
-     retry (EDK2 will reject EBS if the map changed since GetMemoryMap;
-     a single retry is the spec-blessed pattern).
-  4. On success, all UEFI services are gone; jump to the kernel entry.
+  `EFI_LOAD_FILE2_PROTOCOL` under `LINUX_EFI_INITRD_MEDIA_GUID`.
+- The ExitBootServices retry choreography (refresh `GetMemoryMap` on
+  `EFI_INVALID_PARAMETER`).
 
-Acceptance: on QEMU/OVMF amd64 + arm64, a vanilla upstream Linux
-kernel boots from `oci://localhost:5000/k8s-mainline:latest` and
-prints its banner over the OVMF console (same VT100 we used in
-Phase 1). riscv64 + loong64 are expected to work but may surface a
-firmware idiosyncrasy that becomes its own M4.x finding.
+Acceptance: a vanilla upstream Linux kernel boots from
+`oci://localhost:5000/k8s-mainline:latest` on QEMU+EDK2 amd64 +
+arm64, and on vfkit arm64. riscv64 + loong64 are expected to work
+but may surface a firmware idiosyncrasy that becomes its own M8.x
+finding.
 
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
+Under Path Y, the gate names shifted (M3 → M7 for signature verification;
+M4 → M8 for EBS handoff) but the substance of each gate is the same.
 
 1. **Multi-arch parity.** All four arches reach a Linux login prompt
    under QEMU/OVMF using the same EFI binary build pipeline (modulo the
    per-arch `BOOT<ARCH>.EFI` artifact). Recorded under
    `cloud-boot/iso`'s `task test:multiarch:boot` extended with a
-   `phase2-oci` profile.
+   `phase2-oci` profile. **arm64 additionally must pass on Apple VZ
+   via vfkit** — Path Y's whole motivation.
 2. **Signature verification correctness.** Tampering one byte in the
    manifest OR a blob OR the signature MUST cause the loader to halt
    *before* `ExitBootServices`, with the failure printed to ConOut.
-   A negative-path test fixture is part of M3's CI.
+   A negative-path test fixture is part of M7's CI.
 3. **Network-failure modes.** Loss of DHCP lease, registry DNS NXDOMAIN,
    TCP RST during blob fetch, TLS handshake timeout, HTTP 5xx with
    `Retry-After`. Each MUST end in a clean halt (no jump to a partial
@@ -263,117 +427,93 @@ These are not unit tests; they are end-to-end gates that block shipping.
    between `GetMemoryMap` and EBS).
 5. **Transient-retry behaviour on the registry.** A 503 with backoff
    from the registry must NOT propagate to a boot failure — exponential
-   backoff with jitter, capped at N retries (M3 sets N), then halt.
+   backoff with jitter, capped at N retries (M7 sets N), then halt.
    Soak with a host-side faulty proxy.
 
 ## 5. Risks
 
-### R-M2 (HIGH) — UEFI TLS variability
+### R-M1'a (HIGH, this milestone) — Does VZ expose `EFI_PCI_IO_PROTOCOL` for virtio-net?
 
-`EFI_TLS_PROTOCOL` is the least-deployed-in-the-wild part of the
-NetworkPkg surface. Known concrete pain points:
+The whole Path Y plan rests on UEFI exposing per-controller PCI IO
+handles for the platform's virtio devices. On EDK2 (QEMU + OVMF /
+EDK2-stable202408 + virt) this is the normal way: the PciBus driver
+walks the root bridge, publishes an `EFI_PCI_IO_PROTOCOL` instance
+per function, and we `LocateHandleBuffer(EFI_PCI_IO_PROTOCOL_GUID,
+...)` to find them. Apple VZ uses its own firmware (not EDK2) and
+its protocol coverage is documented as sparse on networking
+(`docs/tutorials/vfkit.md`).
 
-- EDK2's `TlsDxe` historically defaulted to TLS 1.0 / 1.1 cipher
-  suites; modern registries (Docker Hub, ghcr.io, Quay) require TLS 1.2+
-  with AEAD ciphersuites. Some firmwares ship with no AEAD suite at
-  all and the handshake fails before we see a cert.
-- `EFI_TLS_PROTOCOL.SetSessionData(EfiTlsCipherList, ...)` parameter
-  layout has churned: an older edk2 release shipped
-  `EFI_TLS_CIPHER_BUFFER` instead of the spec's
-  `EFI_TLS_CIPHER`. We can be tripped by either.
-- Some platform integrations have NO `EFI_TLS_PROTOCOL` handle at all;
-  HTTPS is via the platform's HTTP Boot's built-in TLS rather than an
-  exposed protocol.
+**Open question this milestone validates.** Does VZ ship at least one
+`EFI_PCI_IO_PROTOCOL` handle whose Pci.Read returns vendor 0x1AF4 +
+device 0x1040/0x1041 ? If yes, M2..M8 carry forward. If no, we need
+to investigate alternatives:
 
-**Fallback plan**: if `EFI_TLS_PROTOCOL` is missing or its
-`SetSessionData` rejects our cipher list, fall back to Go-stdlib
-`crypto/tls` running over an `EFI_TCP4_PROTOCOL` socket. The cost is
-shipping `crypto/tls` in our PE (a few MB) and CPU-bound handshake on
-the bootstrap. Acceptable. The detection logic lives in
-`tls_protocol.go`: probe for the handle, if absent, mark TLS-on-TCP4
-mode. This MUST be designed up-front so M3's `oci_client.go` is
-transport-agnostic.
+- Walk `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL` (UEFI 2.10 §13.2) directly
+  and enumerate PCI config space ourselves.
+- Use `gBS->LocateHandleBuffer(AllHandles, NULL, NULL, &count, &h)` +
+  iterate every protocol on every handle, looking for any
+  virtio-flavoured GUID.
+- As a last resort: speak to the virtio-net device through
+  `EFI_SIMPLE_NETWORK_PROTOCOL` if VZ publishes it — but that
+  re-introduces a firmware-stack dependency Path Y was trying to
+  remove.
 
-### R-M0 — `GetMemoryMap` quirks
+**Acceptance gate**: the M1 vfkit run reports at least one virtio-net
+device with a non-zero MAC. If it doesn't, the M1 agent run STOPS
+and reports.
 
-UEFI's `GetMemoryMap` is one of the few Boot Services that returns
-data through *two* output buffers (descriptors + opaque map key) plus
-an output `DescriptorSize` that callers MUST respect (descriptors may
-be *larger* than `sizeof(EFI_MEMORY_DESCRIPTOR)` if the firmware
-includes implementation-private fields after the spec'd ones). Our
-parser MUST stride by `DescriptorSize`, not by `sizeof(Go struct)`.
-The M0 unit test exercises both `DescriptorSize == sizeof(spec)` and
-`DescriptorSize == sizeof(spec) + 8`.
+### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 
-#### R-M0a — **M0 finding 2026-06-07: riscv64 EDK2 requires non-NULL `DescriptorVersion`**
+`gvisor.dev/gvisor/pkg/tcpip` is the only mature pure-Go TCP/IP stack
+in the ecosystem. It uses `unsafe.Pointer` arithmetic and `sync`
+primitives heavily. TamaGo provides both, so this should work, but:
 
-The M0 probe boots end-to-end on **amd64 / arm64 / loong64** under
-QEMU + EDK2-stable202408. Concrete numbers from the M0 run:
+- gvisor relies on `init()` ordering and a few package globals that
+  expect a normal Linux/POSIX runtime. TamaGo's `goos=tamago` may
+  miss a hook.
+- gvisor's `tcpip/link/*` adapters assume socket-style FDs in places
+  (rawfile, fdbased). We use the `channel` adapter or write our own
+  `LinkEndpoint` directly — no FDs involved.
 
-| arch    | descriptors | DescriptorSize | Conventional RAM | comments                |
-| ------- | ----------: | -------------: | ---------------: | ----------------------- |
-| amd64   |         119 |             48 |      ~2.09 GiB   | -m 2048                 |
-| arm64   |          31 |             48 |      ~4.22 GiB   | -m 4096                 |
-| loong64 |          51 |             48 |      ~4.18 GiB   | -m 4096                 |
-| riscv64 |        FAIL |              — |              —   | store-access page-fault |
+**Mitigation if it doesn't compile/run under TamaGo at M3:** drop
+gvisor and write a minimal pure-Go IPv4 + TCP + UDP stack ourselves
+(scope: ARP, IPv4 send/recv, UDP for DHCP+DNS, TCP for HTTP). This
+is a few weeks of work — preferred over Path X relapse.
 
-DescriptorSize is **48** on every working arch (40 spec + 8
-firmware-private bytes) — exactly the case the M0 parser was built
-for, and the case the unit test
-`TestParseMemoryMap_LargerStride` covers.
+### R-M0 (resolved) — `GetMemoryMap` quirks + riscv64 NULL-deref
 
-riscv64 faults inside firmware:
+Two facets, both resolved in the M0+salvage commits:
 
-    !!!! RISCV64 Exception Type - 000000000000000F
-         (EXCEPT_RISCV_STORE_ACCESS_PAGE_FAULT) !!!!
-    sepc  = 0x000000008316F61E
-    stval = 0xFFFFFFFFFFFFFF00
+- **Stride.** UEFI's `GetMemoryMap` returns an output `DescriptorSize`
+  that callers MUST respect (descriptors may be *larger* than
+  `sizeof(EFI_MEMORY_DESCRIPTOR)` if the firmware includes
+  implementation-private fields after the spec'd ones). Our parser
+  strides by `DescriptorSize`. M0 unit test
+  `TestParseMemoryMap_LargerStride` covers both 40-byte and 48-byte
+  strides.
+- **R-M0a (riscv64 NULL-DescriptorVersion fault, resolved).** M0
+  observed:
 
-The `stval` value (effectively `(uintptr)NULL - 256`) is the
-canonical "near-NULL plus a small offset" signature: EDK2's
-`MdeModulePkg/Core/Dxe/Mem/Page.c::CoreGetMemoryMap` on riscv64
-unconditionally writes `*DescriptorVersion =
-EFI_MEMORY_DESCRIPTOR_VERSION` on the success path, even when the
-caller passed NULL. amd64 / arm64 / loong64 EDK2 builds tolerate the
-NULL pointer (either via a guard the riscv64 port lacks, or via the
-target's exception model letting the store be silently ignored — most
-likely the former: the spec REQUIRES NULL to be rejected with
-`EFI_INVALID_PARAMETER`, but the implementation only checks the first
-two parameters).
+  | arch    | descriptors | DescriptorSize | Conventional RAM | comments                |
+  | ------- | ----------: | -------------: | ---------------: | ----------------------- |
+  | amd64   |         119 |             48 |      ~2.09 GiB   | -m 2048                 |
+  | arm64   |          31 |             48 |      ~4.22 GiB   | -m 4096                 |
+  | loong64 |          51 |             48 |      ~4.18 GiB   | -m 4096                 |
+  | riscv64 |        FAIL |              — |              —   | store-access page-fault |
 
-**Mitigation, deferred to M1**: extend `efiCall` from 4-arg to 5-arg
-across all four `eficall_<arch>.s` thunks, and pass a non-NULL
-`DescriptorVersion` pointer. The 5th integer arg goes in:
+  Root cause: the 4-arg `efiCall` thunk left A4 with whatever value
+  the Go runtime had spilled there. EDK2 stable202408's
+  `CoreGetMemoryMap` reads A4 as the `DescriptorVersion` OUT pointer
+  and stores `*DescriptorVersion = EFI_MEMORY_DESCRIPTOR_VERSION` on
+  the success path. amd64 / arm64 / loong64 happened to leave the
+  position zero so EDK2's NULL guard kicked in; riscv64 didn't get
+  that luck. **Fix (shipped in
+  [cfa6dca](https://github.com/cloud-boot/tamago-uefi/commit/cfa6dca))**:
+  widen `efiCall` to 5 args across all four arches and pass a
+  real `*uint32` for DescriptorVersion. Re-validation in the M1
+  agent's regression run.
 
-- amd64 (MS x64): R10? — no, only RCX/RDX/R8/R9 are register args;
-  the 5th is on the stack at `[RSP+32]` (above the 32-byte shadow
-  space). Thunk must push it before `CALL (AX)`.
-- AArch64 / RISC-V LP64 / LoongArch LP64: the 5th integer arg is in
-  X4 / A4 / R8 (A4 register), respectively. Thunk can simply load it
-  there before the BL/JALR/JAL.
-
-A defensible alternative is to wrap the 5-arg call site in a per-arch
-ASM helper rather than retrofitting all of `efiCall`; the trade-off
-is whether *any* other Phase-2 Boot Service we plan to call needs >4
-args. Per the UEFI 2.10 spec, AllocatePool (3 args), FreePool (1),
-LocateProtocol (3), HandleProtocol (3), LoadImage (6 — yes, this is
-the other 5+ arg case we'll need at M4), StartImage (3),
-ExitBootServices (2). LoadImage's 6 args force the 5+ arg extension
-anyway, so we do it once in M1 rather than twice.
-
-Until that lands, the M0 probe builds emit the same Phase-1 banner +
-fault on riscv64 and the design-doc cite this section. amd64 / arm64
-/ loong64 carry M1+ forward.
-
-### R-M1 — Boot-time DHCP rebinding
-
-`EFI_DHCP4_PROTOCOL` returns a lease; the firmware does NOT renew it
-during our pre-EBS lifetime, but our session can outlast the rebind
-window if a blob takes minutes to fetch. For the M1 PoC we accept
-this; M3 caps total runtime; M4's retry loop refreshes DHCP if a
-network call fails with EFI_TIMEOUT.
-
-### R-M4 — Per-arch handoff calling conventions
+### R-M8 — Per-arch handoff calling conventions (unchanged from Path X plan)
 
 The four arches do NOT share an entry shape:
 
@@ -382,7 +522,7 @@ The four arches do NOT share an entry shape:
 - arm64 + riscv64 + loong64 each have their own EFI stub entry +
   expected register state.
 
-The M4 plan above pins the canonical Linux references per arch; if a
+The M8 plan pins the canonical Linux references per arch; if a
 given Linux release diverges (it has happened on riscv64), document
 the divergence here.
 
@@ -397,34 +537,55 @@ Per milestone, revisit at the start of the M-N agent run.
   M0 wrapper implements this. Confirmed against EDK2's
   `MdeModulePkg/Library/UefiBootManagerLib/BmMisc.c` (`BmGetMemoryMap`).
 
-### M1
+### M1 (Path Y — virtio-net device discovery)
 
-- Does `EFI_DHCP4_PROTOCOL` expose enough to drive a managed
-  `EFI_HTTP_PROTOCOL` end-to-end, or do we need a `MNP` config call in
-  between? EDK2 `HttpDxe/HttpProto.c::HttpInitProtocol` suggests no
-  manual MNP step is needed but it depends on whether the firmware
-  pre-creates the MNP child.
+- Does VZ publish `EFI_PCI_IO_PROTOCOL` handles? See R-M1'a. Probe
+  answers this in the M1 run.
+- Legacy (DID 0x1000) vs modern (DID 0x1041) virtio-net: QEMU+EDK2
+  exposes both depending on `-device` qualifier. VZ is expected to
+  expose modern only. Probe prints both DIDs to be sure.
 - IPv6: Phase 2 ships v4-only. Track v6 as a follow-up.
 
-### M2
+### M2 (virtio-net init + queues)
 
-- Embedded root CAs: ship a single self-signed CA at build time, or
-  parse the `EFI_TLS_CA_CERTIFICATE` UEFI variable? Both are valid;
-  defer the call to M2's start.
-- If we end up on the TLS-on-TCP4 fallback path, do we still want
-  `EFI_HTTP_PROTOCOL` for the HTTP framing (it can run over a TLS
-  socket), or do we plumb a tiny HTTP/1.1 client in Go? The latter is
-  cheaper code-size if we already pulled in `crypto/tls`.
+- Cache-coherency requirements for the ring buffers on arm64 /
+  riscv64 / loong64. UEFI Boot Services memory is meant to be
+  cache-coherent; we don't add barriers and lean on that. Verify on
+  the first non-amd64 run.
+- MTU: stick to 1500 in M2; M3 may renegotiate via netstack.
 
-### M3
+### M3 (gvisor netstack)
+
+- Does gvisor's `tcpip` package compile cleanly under
+  `GOOS=tamago`? See R-M3'a. If not, swap in a hand-rolled minimal
+  stack.
+- Static IP for the M3 probe, or skip directly to M4 DHCP? Plan:
+  static (10.0.2.15) on QEMU `user` net, defer DHCP to M4.
+
+### M4 (DHCPv4)
+
+- Lease refresh: skip in M4 (boot lifetime < 60 s). Track as a
+  follow-up if a registry pull stretches past lease time.
+
+### M5 (DNS + HTTP)
+
+- Does TamaGo's `net/http` import surface compile clean? Pre-verify
+  at the start of M5.
+
+### M6 (TLS)
+
+- Embedded root CAs: ship a single self-signed CA at build time
+  (constant). `InsecureSkipVerify` MUST be false in shipped builds.
+
+### M7 (OCI client)
 
 - OCI registries chunk blob responses with `Content-Range`/`Range`.
-  Required for >2 GiB blobs, not for kernels. Skip in M3, add an
-  M3.1 follow-up issue.
+  Required for >2 GiB blobs, not for kernels. Skip in M7, add an
+  M7.1 follow-up issue.
 - Cosign vs. notation vs. raw PGP for signatures: cosign is the
   current de-facto; the bundle format is stable.
 
-### M4
+### M8 (EFI-stub handover)
 
 - `EFI_LOAD_FILE2_PROTOCOL` publication ordering: must precede
   `LoadImage` of the kernel, since the EFI stub looks the GUID up
@@ -446,7 +607,7 @@ Per milestone, revisit at the start of the M-N agent run.
   [`architecture/three-paths.md`](docs/architecture/three-paths.md).
 - Hypervisor protocol coverage matrix:
   [`architecture/hypervisors.md`](docs/architecture/hypervisors.md).
-- The cosign-compatible signing format we will verify in M3 is
+- The cosign-compatible signing format we will verify in M7 is
   documented in the
   [Sigstore bundle spec](https://github.com/sigstore/protobuf-specs).
 
@@ -458,5 +619,21 @@ Per milestone, revisit at the start of the M-N agent run.
   — counts + per-type RAM totals print to ConOut, then halt. **One
   surprise**: riscv64 EDK2 faults inside the firmware when
   `DescriptorVersion` is NULL — see §5 R-M0a. Mitigation deferred
-  to M1 (extend `efiCall` to 5-arg arity, which we already need for
-  `LoadImage` at M4). amd64 / arm64 / loong64 carry forward unblocked.
+  to the next milestone (extend `efiCall` to 5-arg arity, which we
+  already need for `LoadImage` at the end of the arc). amd64 / arm64
+  / loong64 carry forward unblocked.
+- **2026-06-07** (Path Y pivot + M1): Path X (UEFI Boot Service
+  network protocols) abandoned — Apple VZ firmware does not expose
+  `EFI_HTTP_PROTOCOL` / `EFI_DHCP4_PROTOCOL` / `EFI_DNS4_PROTOCOL` /
+  `EFI_TCP4_PROTOCOL` / `EFI_TLS_PROTOCOL`, so the multi-hypervisor
+  contract that motivates shape A cannot be met by Path X. Path Y
+  adopted: pure-Go virtio-net + gvisor/netstack + Go stdlib DHCP /
+  DNS / HTTP / TLS, layered above the lowest-level UEFI services
+  (PCI IO enumeration + AllocatePages + ExitBootServices). Salvage
+  commit
+  [cfa6dca](https://github.com/cloud-boot/tamago-uefi/commit/cfa6dca)
+  keeps the 5-arg `efiCall`, the GetMemoryMap NULL-DescriptorVersion
+  fix (resolves R-M0a — riscv64 GetMemoryMap now succeeds), and the
+  protocol-handler service-binding helpers. M1 lands the
+  `EFI_PCI_IO_PROTOCOL` bindings + virtio PCI capability discovery
+  + `phase2_pcienum` probe. M1..M8 milestone list rewritten in §3.
