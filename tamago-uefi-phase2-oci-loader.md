@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0 done; Path Y M1 in flight)
+status: design / in-progress (M0..M1.6 done; Path Y'' M2 virtio-net rail in flight)
 last-updated: 2026-06-07
 ---
 
@@ -124,9 +124,12 @@ Costs we accept:
 What we keep from the M0..M1 Path X work (salvaged in the M1-prep
 commit):
 
-- `efiCall` widened from 4 to 5 args across all four arches. Still
-  needed for `LoadImage` (6 args) at M8 and for `EFI_PCI_IO_PROTOCOL`'s
-  config-space accessors at M1.
+- `efiCall` widened from 4 to 5 args at M1, then from 5 to 6 args
+  at M2 across all four arches. The 5→6 widening is driven by
+  `EFI_PCI_IO_PROTOCOL.Mem.Read/Write`, whose six-arg signature
+  `(This*, Width, BarIndex, Offset, Count, Buffer*)` is the M2
+  virtio-net rail's only MMIO entry point. `LoadImage` (6 args)
+  at M8 also fits this envelope.
 - `memorymap_tamago.go` NULL-DescriptorVersion fix (R-M0a resolved).
 - `efi_events.go` / `efi_events_tamago.go` — async-event plumbing,
   still useful for any `LoadImage`-style 5+-arg path.
@@ -398,70 +401,144 @@ capability matrix; see §5.
 
 ### M2 — virtio-net init + virtqueues + send/recv one frame
 
-**Pre-M2 path-choice surfaced by M1.6.** The full per-hypervisor /
-per-arch capability matrix is now known (see §5 R-M1'a M1.6
-findings + R-M1.5x). Summary:
+**Path choice: Path Y'' adopted.** Per the M1.6 capability matrix
+(QEMU+EDK2 amd64/arm64/loong64: PCI IO + SNP; QEMU+EDK2 riscv64:
+SNP only; Apple VZ: PCI IO only), no single rail covers all
+five cells. M2 implements the **virtio-net pure-Go rail** (Path Y).
+M2.1 follows with the **SNP wrapper** (Path Y'). M2.2 ships the
+**runtime chooser** that selects between them per-handle.
 
-|  hypervisor / arch       |  PCI IO  |   SNP   |
-| ------------------------ | :------: | :-----: |
-| QEMU+EDK2 amd64          |    yes   |   yes   |
-| QEMU+EDK2 arm64          |    yes   |   yes   |
-| QEMU+EDK2 loong64        |    yes   |   yes   |
-| QEMU+EDK2 riscv64        |  NO\*    |   yes   |
-| Apple VZ (vfkit) arm64   |    yes   |   NO    |
+|  hypervisor / arch       |  PCI IO  |   SNP   |  M2 (virtio-net pure-Go) |  M2.1 (SNP wrapper)  |
+| ------------------------ | :------: | :-----: | :----------------------: | :------------------: |
+| QEMU+EDK2 amd64          |    yes   |   yes   |          PRIMARY         |       fallback       |
+| QEMU+EDK2 arm64          |    yes   |   yes   |          PRIMARY         |       fallback       |
+| QEMU+EDK2 loong64        |    yes   |   yes   |          PRIMARY         |       fallback       |
+| QEMU+EDK2 riscv64        |  NO\*    |   yes   |        not viable        |       PRIMARY        |
+| Apple VZ (vfkit) arm64   |    yes   |   NO    |          PRIMARY         |     not viable       |
 
 \* riscv64 EDK2's PciBus driver binds the root bridge but not
-virtio-net; see R-M1.5x.
-
-Three candidate M2 directions, each with different LOC + per-arch
-support shape:
-
-**Path Y (virtio-net pure-Go via PCI IO, the original plan).**
-~3000 LOC: feature negotiation, virtqueue alloc, RX / TX, MAC
-read via `PciIo.Mem.Read` against BAR0+DeviceCfg offset.
-Works on 4 of 5 cells in the matrix (everything except QEMU
-riscv64). Requires a riscv64 fallback (Path Y' or an EDK2
-upstream patch to bind virtio-net to PCI IO).
-
-**Path Y' (SNP-first).** ~300 LOC: wrap the firmware's
-`EFI_SIMPLE_NETWORK_PROTOCOL.Transmit` / `Receive` as a Go
-`LinkEndpoint`. Works on 4 of 5 cells (everything except Apple
-VZ). Apple VZ doesn't publish SNP, so this path CANNOT cover VZ
-on its own.
-
-**Path Y'' (both, with runtime detection).** Implement Path Y as
-the primary path; fall back to Path Y' on hypervisors that fail
-to surface virtio-net through PCI IO (riscv64 EDK2). The runtime
-chooser is small (handle-set intersection at probe time).
-Covers all 5 cells. Cost: Y + Y' = ~3300 LOC + ~50 LOC chooser.
-
-**Recommendation surfaced, not chosen.** The trade-off is:
-
-- **Path Y alone**: leaves riscv64 unsupported (or dependent on
-  an EDK2 upstream patch we'd own). 1 LOC line.
-- **Path Y' alone**: leaves Apple VZ unsupported. Not viable;
-  VZ is a primary target.
-- **Path Y'' (both)**: full coverage; ~10 % more code than Y
-  alone; matches the design's "no per-hypervisor codepath
-  splits at the user-visible API" intent.
-
-The user picks: Y''-first feels like the natural choice given that
-VZ support is non-negotiable and Y' is small. Recording here for
-the M2 milestone owner.
+virtio-net; see R-M1.5x. M2.1's SNP wrapper is the chosen
+work-around (an EDK2 patch is being staged in parallel but the
+SNP path is already universally available).
 
 **Deliverable.** A pure-Go virtio-net driver capable of sending one
 ARP request and receiving the reply. No TCP/IP stack yet — just raw
 Ethernet frame in / frame out over the virtio rings.
 
+**M2 changelog (2026-06-07).**
+
+- **`uefiboard/pci_mem_io.go`** — `EFI_PCI_IO_PROTOCOL.Mem.Read/Write`
+  thunks at 8/16/32/64-bit widths, routing through the M2-widened
+  6-arg `efiCall` envelope. Reference: MdePkg/Include/Protocol/PciIo.h
+  (edk2.git stable/202408).
+- **`uefiboard/eficall_<arch>.s`** — widened 5→6 args on all four
+  architectures (amd64 stack slot at [RSP+0x28]; arm64 X5; loong64
+  A5; riscv64 A5). All existing call sites updated to pass `0` for
+  the new trailing slot. The widening continues the M1 invariant
+  ("every position MUST hold a defined value") that fixed the
+  riscv64 EDK2 stale-A4 fault. The Go declaration is now
+  `func efiCall(fn, a0, a1, a2, a3, a4, a5 uint64) (status uint64)`.
+- **`uefiboard/alloc_pages.go`** — `gBS->AllocatePages` /
+  `gBS->FreePages` thunks (UEFI 2.10 §7.2). M2 uses
+  `EfiBootServicesData + AllocateAnyPages` for virtqueue + DMA buffer
+  allocations (lifetime ends at ExitBootServices, exactly what M2
+  needs).
+- **`uefiboard/virtio_modern.go`** + **`virtio_modern_tamago.go`** —
+  Virtio 1.1 §4.1.5.1 COMMON_CFG register layout + the parsed
+  `VirtioModernConfig` struct + `InitVirtioModernConfig(pciIO)`
+  which walks the capability list, locates COMMON / NOTIFY / ISR /
+  DEVICE / PCI cfg caps, reads the
+  `notify_off_multiplier` from the extended NOTIFY_CFG cap (Virtio
+  1.1 §4.1.4.4), and returns a populated config. Per-register
+  accessors (DeviceFeatures64, SetDriverFeatures64, DeviceStatus,
+  SelectQueue, QueueSize, QueueNotifyOff, SetQueueDesc/Driver/Device,
+  SetQueueEnable, NotifyQueue) route through PciIo.Mem.Read/Write
+  against (CommonCfgBAR, offset+reg). `DeviceCfgRead8` enforces the
+  R-M1.6a bounds-check (VZ ships length=17 vs QEMU's larger).
+- **`uefiboard/virtqueue.go`** + **`virtqueue_tamago.go`** — split
+  virtqueue layout per Virtio 1.1 §2.6 (descriptor table, available
+  ring, used ring on one contiguous AllocatePages allocation; 4-byte
+  alignment on the used ring; `unsafe.Slice` views for direct read/
+  write of the on-the-wire layout). `Virtqueue.PostAvail` publishes
+  via an `atomic.StoreUint32` on the 4-byte avail-ring header word —
+  this gives release semantics on every supported Go arch (amd64
+  TSO, arm64 STLR, loong64 dbar, riscv64 fence rw,w). `PollUsed`
+  pairs it with an `atomic.LoadUint32` acquire on the used-ring
+  header. The cache-coherency story documented in
+  `virtqueue_tamago.go`: UEFI 2.10 §2.3.x requires
+  EfiBootServicesData to be cache-coherent during Boot Services,
+  which is the only window M2 runs in.
+- **`uefiboard/virtio_net.go`** + **`virtio_net_tamago.go`** —
+  `OpenVirtioNet(pciIO)` performs the full 7-step Virtio 1.1 §3.1.1
+  init sequence: RESET → ACKNOWLEDGE → DRIVER → feature
+  negotiation (we accept VIRTIO_NET_F_MAC + VIRTIO_NET_F_STATUS +
+  VIRTIO_F_VERSION_1; nothing else — including NOT
+  VIRTIO_NET_F_MRG_RXBUF so the RX path is single-buffer-per-packet)
+  → FEATURES_OK + verification → rxq (idx 0) + txq (idx 1) setup
+  → DRIVER_OK → MAC read. RX ring pre-posted with 16 × 1518-byte
+  buffers + notify. `TransmitFrame` prepends the 12-byte
+  `virtio_net_hdr` (Virtio 1.1 §5.1.6 — always 12 bytes on a
+  VERSION_1 device regardless of MRG_RXBUF), enqueues to txq,
+  notifies, polls for completion. `ReceiveFrame` polls the rxq used
+  ring, strips the header, refills the descriptor's buffer.
+- **`phase2_virtionet_tx.go`** — new M2 probe binary, gated on
+  `-tags phase2_virtionet_tx` and composing with `phase2_blkprintk`
+  for VZ observability. Locates the first VID:DID 1AF4:1041 modern
+  virtio-net device, opens it, transmits **two** ARP requests
+  (QEMU NAT `10.0.2.15 → 10.0.2.2` AND VZ NAT
+  `192.168.64.2 → 192.168.64.1`; the wrong-subnet broadcast is
+  harmless), polls for replies for 3 attempts × 500000 iterations,
+  prints the first 64 bytes + source MAC of every captured frame.
+- **`Taskfile.yaml`** — `virtionet:elf:<arch>` + `virtionet:efi:<arch>`
+  + `virtionet:all` targets. Tag set composed:
+  `linkcpuinit,linkramstart,phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_tx`.
+- **Tests.** `virtio_modern_test.go` (12 tests; COMMON_CFG register
+  offsets, ParseVirtioCaps happy/edge/error paths including R-M1.6a
+  VZ-shape DeviceCfg length=17, PerQueueNotifyOffset arithmetic,
+  status + feature bit values). `virtqueue_test.go` (15 tests; layout
+  arithmetic at size=16 and size=256, descriptor read/write
+  round-trips, AddBuffer + PostAvail + PollUsed state machine,
+  ring-wrap behaviour over 5 fill/drain rounds, ErrQueueFull /
+  ErrInvalidIdx surfacing). `virtio_net_test.go` (12 tests; header
+  prepend/strip round-trip, feature acceptance happy/missing-VERSION_1/
+  missing-MAC paths, MAC6 stringification, queue indices, accepted
+  feature mask). Coverage: **uefiboard 98.3%** (up from M1.6's 98.0%);
+  virtio_modern.go 98.6%, virtio_net.go 97.5%, virtqueue.go 99.1%.
+
+**Live validation status (2026-06-07).** Per-platform validation
+requires the boot harness in `cloud-boot/iso` (out of M2 scope —
+the iso owner runs the live boots). The four M2 EFI binaries
+(`BOOTX64-VIRTIONET.EFI`, `BOOTAA64-VIRTIONET.EFI`,
+`BOOTRISCV64-VIRTIONET.EFI`, `BOOTLOONGARCH64-VIRTIONET.EFI`) all
+build green from `task virtionet:all`. Banner rodata regression
+(`internal/bannertest`) PASS on all four Phase-1 EFIs (M2 did NOT
+regress earlier outputs). Pending live boot:
+
+- **QEMU+EDK2 amd64/arm64/loong64**: expected outcome — full init
+  through DRIVER_OK; MAC matches QEMU's `-device virtio-net,mac=...`;
+  TX OK; ARP reply received from gateway MAC 52:55:0a:00:02:02.
+- **QEMU+EDK2 riscv64**: expected outcome — probe surfaces
+  "no modern virtio-net device found" cleanly (PCI IO binds root
+  bridge only on riscv64-virt; see R-M1.5x). M2.1's SNP rail is
+  the production path for riscv64; the M2 probe binary still
+  builds + runs to confirm the diagnostic surface.
+- **Apple VZ (vfkit) arm64**: expected outcome — full init through
+  DRIVER_OK against the VZ-shape device-cfg (length=17 → R-M1.6a
+  bounds-check applies only to fields past MAC[0..6) which are not
+  read on M2). MAC matches vfkit's `--device virtio-net,nat,mac=auto`
+  generated value. TX OK; ARP reply from VZ NAT gateway
+  (192.168.64.1) expected.
+
 Scope:
 
 - Feature negotiation against the virtio-net device (VERSION_1, MAC,
-  STATUS, MRG_RXBUF as a minimum).
+  STATUS). MRG_RXBUF intentionally NOT accepted (simplifies RX —
+  single-buffer-per-packet).
 - `EFI_PCI_IO_PROTOCOL.Mem.Read/Write` for BAR-mapped MMIO config.
 - Virtqueue allocation (split-ring layout, 1.1 spec §2.6). Two
   queues: RX[0] and TX[1]. Indirect descriptors deferred.
-- A blocking `SendFrame([]byte) error` and `RecvFrame() ([]byte,
-  error)`.
+- A blocking `TransmitFrame([]byte) error` and `ReceiveFrame(budget
+  int) ([]byte, error)`.
 - Memory: allocate ring buffers via
   `gBS->AllocatePages(EfiBootServicesData)`; lifetime ends at
   ExitBootServices.
@@ -471,19 +548,87 @@ Risks:
 - Cache coherency on arm64 / riscv64 / loong64 when DMA-style writes
   cross between firmware and our Go-side ring buffers. UEFI requires
   the firmware-allocated memory to be cache-coherent for boot-services
-  use; we don't add barriers, we lean on that.
+  use; we don't add manual barriers — we lean on that, plus the
+  release-store/acquire-load on the avail/used ring header words via
+  `sync/atomic`.
 - IRQ vs. polling. M2 polls the used-ring index (firmware doesn't
   give us an EFI_EVENT for virtio-net out of the box). Polling cost
   is acceptable for a one-time fetch.
-- **R-M1.6a (NEW, LOW)** — VZ's virtio-net device-cfg `length=17`
-  is shorter than QEMU's. Sanity-check the field offsets match
-  the modern virtio-net spec exactly (UEFI 2.10 + Virtio 1.1
-  §5.1.4) before reading MAC; a longer config layout on QEMU is
-  forward-compatible but a shorter one on VZ would surface a
-  bounds-check we don't currently do.
+- **R-M1.6a (LOW, partially-addressed)** — VZ's virtio-net device-cfg
+  `length=17` is shorter than QEMU's. M2's `DeviceCfgRead8` enforces
+  the bounds-check against `cfg.DeviceCfgLength`; the MAC read
+  (offset 0..5) is well within both 17 (VZ) and the larger QEMU
+  value. The bounds-check fires only if M3+ asks for fields past
+  MAC (e.g. `max_virtqueue_pairs` at offset 8 — beyond VZ's
+  length=17? No: 8 < 17, still OK. `mtu` at offset 10 — also OK.
+  The first field that would trip is hypothetical post-1.1
+  extensions at offset ≥ 17.) Captured for the M3 stack work.
+- **R-M2a (NEW, MEDIUM)** — `efiCall` was widened 5→6 args. Every
+  existing call site was updated to pass `0` for the new trailing
+  slot. If we missed one (Go's type checker catches the call-site
+  count mismatch, so we shouldn't have), the symptom would be a
+  stale-register dereference on riscv64 (same class of bug as the
+  M1 widening fixed). The Phase-1 / M0 / M1 / M1.5 / M1.6 builds all
+  regenerate cleanly with the M2 widening; the banner rodata test
+  passes on all four arches; M1.6 BOOTAA64-BLKPRINT.EFI / BOOTX64-
+  BLKPRINT.EFI / BOOTRISCV64-BLKPRINT.EFI / BOOTLOONGARCH64-BLKPRINT.EFI
+  build green. Live re-validation on all five platforms is the
+  responsibility of the iso owner.
 
 Acceptance: an ARP request emitted by our driver gets an ARP reply
-visible in our RX ring on QEMU+EDK2 (any arch) and on vfkit (arm64).
+visible in our RX ring on QEMU+EDK2 (any arch with PCI IO virtio-net)
+and on vfkit (arm64). riscv64 acceptance deferred to M2.1's SNP rail.
+
+### M2.1 — SNP wrapper (Path Y' rail, pending)
+
+**Deliverable.** A thin Go wrapper around the firmware's
+`EFI_SIMPLE_NETWORK_PROTOCOL.Transmit` / `Receive` that exposes
+the SAME `LinkEndpoint`-compatible TX/RX API as M2's virtio-net
+driver. This is the riscv64 path (where PCI IO virtio-net doesn't
+bind under stable/202408 EDK2) and the fallback path on the three
+QEMU+EDK2 arches where SNP is also published.
+
+Scope:
+
+- `uefiboard/simple_network_protocol_tamago.go` (live thunks for
+  Initialize / Transmit / Receive / Shutdown — the type-surface
+  in `simple_network_protocol.go` is already in place from M1.5).
+- `phase2_snp_tx` build tag → SNP-rail probe binary (mirror of M2's
+  `phase2_virtionet_tx` probe but driving SNP instead of the
+  virtio-net rail).
+- Per-arch Taskfile targets.
+
+Out of scope for M2.1: the runtime chooser between the two rails —
+that's M2.2.
+
+Acceptance: same ARP echo as M2, but specifically on QEMU+EDK2
+riscv64 (the only platform where M2's virtio-net rail won't
+apply).
+
+### M2.2 — Unified LinkEndpoint + runtime chooser (pending)
+
+**Deliverable.** A `uefiboard.LinkEndpoint` interface that both M2's
+`VirtioNet` and M2.1's `SNPDriver` satisfy, plus a probe-time
+chooser that:
+
+1. Enumerates EFI_PCI_IO_PROTOCOL handles; if any is a modern
+   virtio-net (VID:DID 1AF4:1041), use M2's rail on that handle.
+2. Otherwise enumerate EFI_SIMPLE_NETWORK_PROTOCOL handles; if any
+   is present + MAC non-zero, use M2.1's rail.
+3. Otherwise return ErrNoNetworkAvailable and the caller surfaces
+   a clean diagnostic.
+
+The chooser is small (~50 LOC) and entirely runtime — no
+build-tag splits, no per-hypervisor codepath at the user-visible
+API.
+
+Scope:
+
+- `uefiboard/linkendpoint.go` — the interface + the chooser.
+- `phase2_netchoose` build tag → unified probe binary running the
+  same M2 ARP TX/RX through whichever rail the chooser picked.
+- Acceptance: the unified probe runs successfully on all 5 cells
+  of the M1.6 capability matrix.
 
 ### M3 — gvisor netstack `LinkEndpoint` + ARP + IPv4 + ICMP echo
 
@@ -872,6 +1017,39 @@ when PCI IO doesn't surface the device. Either:
 Track this as a riscv64-specific divergence; amd64 / arm64 /
 loong64 retain the PCI-IO-first plan.
 
+### R-M2a (NEW, MEDIUM) — efiCall widening 5→6 introduces a regression seam
+
+M2 widened `efiCall` from 5 to 6 arguments to fit
+`EFI_PCI_IO_PROTOCOL.Mem.Read/Write`'s six-arg signature. Every
+existing call site was updated to pass `0` for the new trailing
+slot — Go's call-site arity check catches a missed update at
+compile time, so a wrong-arity call CAN'T silently link. But there
+are two failure modes that would NOT surface at compile time:
+
+1. **Stale-register reuse on riscv64.** Same class of bug as M0/M1's
+   4→5 widening: if any future caller passes uninitialised /
+   nonsense in the new a5 slot, EDK2 on riscv64 may try to
+   dereference it as a NULL-relative pointer and fault inside the
+   firmware. Mitigation: caller code MUST pass an explicit `0`
+   or a real pointer; never use a stale Go variable.
+
+2. **MS x64 stack-slot ABI mismatch.** The amd64 thunk now stores
+   the 5th and 6th args at `[RSP+0x20]` and `[RSP+0x28]` above the
+   32-byte shadow space, with 48 bytes total reservation to keep
+   RSP 16-byte aligned after the CALL push. A miscount of any
+   constant here would clobber the firmware's stack. Mitigation:
+   the thunk's frame size + every offset is asserted by inspection
+   in `eficall_amd64.s`; regression watch via live boot of the
+   M1.6 BlkPrintk EFI on QEMU+EDK2 amd64 (the most thoroughly-
+   exercised path).
+
+Status: MEDIUM. The host `uefiboard` tests don't touch this code
+(efiCall is `//go:build tamago`); only live boots exercise it.
+Phase-1, M0, M1, M1.5, and M1.6 binaries all rebuild cleanly with
+the M2 widening (no compile errors); the banner rodata regression
+test PASSES; iso-harness live re-validation is the responsibility
+of the iso owner.
+
 ### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 
 `gvisor.dev/gvisor/pkg/tcpip` is the only mature pure-Go TCP/IP stack
@@ -1130,3 +1308,35 @@ Per milestone, revisit at the start of the M-N agent run.
   `go test ./uefiboard/... ./cmd/...` PASS;
   uefiboard coverage 98.0 % (up from 96.5 %),
   blkprintk-seed 80.0 %, blkprintk-recover 91.7 %.
+- **2026-06-07** (M2): Path Y'' adopted; virtio-net pure-Go
+  rail SHIPPED. Widened `efiCall` 5→6 args across all four
+  arches (amd64/arm64/loong64/riscv64) so
+  `EFI_PCI_IO_PROTOCOL.Mem.Read/Write(This*, Width, BarIndex,
+  Offset, Count, Buffer*)` fits the envelope. New
+  `uefiboard/pci_mem_io.go` (8/16/32/64-bit typed Mem accessors),
+  `alloc_pages.go` (gBS->AllocatePages thunk),
+  `virtio_modern.go` + `virtio_modern_tamago.go` (Virtio 1.1
+  §4.1.5.1 COMMON_CFG register layout + `InitVirtioModernConfig`
+  walker + per-register accessors including the R-M1.6a-safe
+  `DeviceCfgRead8`), `virtqueue.go` + `virtqueue_tamago.go` (split
+  virtqueue layout per Virtio 1.1 §2.6 with `unsafe.Slice` views
+  + `atomic.StoreUint32`/`LoadUint32` release/acquire on the
+  ring headers + `AllocDMABuffer` allocator), `virtio_net.go`
+  + `virtio_net_tamago.go` (full Virtio 1.1 §3.1.1 init sequence,
+  feature negotiation accepting only MAC/STATUS/VERSION_1,
+  16-buffer pre-posted rxq, `TransmitFrame`/`ReceiveFrame`).
+  Probe `phase2_virtionet_tx` (`BOOT<arch>-VIRTIONET.EFI`) opens
+  the first 1AF4:1041 device, transmits two ARP requests (one
+  per probable NAT layout: QEMU 10.0.2.x + VZ 192.168.64.x),
+  polls RX for replies + prints captured frames. All four arches
+  build green via `task virtionet:all`. Phase-1 / M0 / M1 /
+  M1.5 / M1.6 EFIs rebuild cleanly with the 6-arg widening; the
+  banner rodata regression test PASSES on all four arches.
+  Host `go test ./uefiboard/... ./cmd/... ./internal/bannertest/...`
+  PASS; uefiboard coverage **98.3 %** (up from 98.0 %),
+  virtio_modern.go 98.6 %, virtio_net.go 97.5 %,
+  virtqueue.go 99.1 %. R-M2a (efiCall widening regression risk)
+  introduced + MEDIUM — mitigated by Go's call-site
+  type-checking, awaits live re-validation of all five matrix
+  cells via the iso harness. M2.1 (SNP wrapper) and M2.2
+  (unified LinkEndpoint + chooser) scoped + queued.
