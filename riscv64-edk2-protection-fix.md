@@ -174,9 +174,34 @@ only `0199530a` has touched `BaseRiscVMmuLib.c` since
 `edk2-stable202408`, and that commit changes the interrupt-state
 toggling in `RiscVMmuSetSatpMode`, not `SetPpnToPte`.
 
-## Upstream contribution plan (when authorized)
+## Upstream submission — SUBMITTED 2026-06-07
 
-* **Mailing list**: `devel@edk2.groups.io` (TianoCore devel list).
+**Status: submitted as a GitHub pull request.**
+
+* **PR**: <https://github.com/tianocore/edk2/pull/12650> —
+  `UefiCpuPkg/BaseRiscVMmuLib: fix bitwise-vs-logical typo in
+  SetPpnToPte ASSERT`, base `tianocore/edk2:master`, head
+  `tannevaled/edk2:riscv64-mmulib-assert-typo`.
+* **Channel chosen**: GitHub PR rather than `git send-email` to
+  `devel@edk2.groups.io`. EDK2 accepts GitHub pull requests (the
+  groups.io wiki/list is now read-only), and `git-send-email` is not
+  installed on the authoring host. The PR carries the same
+  single-commit, DCO-signed change the mailing-list plan below
+  described.
+* **Author/committer/sign-off**: `David Delavennat
+  <tannevaled@users.noreply.github.com>` on all three. No
+  `Co-Authored-By` trailer (EDK2 doesn't accept them).
+* **Patch regeneration note**: the staged
+  `edk2-riscv64-protection-fix.patch` was generated against
+  `edk2-stable202408`; its context did not apply cleanly on current
+  `master` (surrounding lines shifted), so the one-line change
+  (`~` → `!` at `BaseRiscVMmuLib.c:243` on master) was re-applied
+  directly and committed with the identical message + sign-off.
+
+The reviewer/CC notes below are retained for reference (GitHub PR
+auto-notifies the `Maintainers.txt` owners, but knowing who they are
+is still useful):
+
 * **Recommended commit prefix**: `UefiCpuPkg/BaseRiscVMmuLib:` (matches
   existing commit history for this file).
 * **CC list** (per

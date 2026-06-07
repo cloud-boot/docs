@@ -235,8 +235,9 @@ validation.
     per maintainer request).
   - [`docs/edk2-riscv64-protection-fix.patch`](https://github.com/cloud-boot/docs/blob/main/edk2-riscv64-protection-fix.patch)
     — drive-by `~` → `!` assert typo fix in EDK2's
-    `BaseRiscVMmuLib.c`, found during the riscv64 firmware audit;
-    awaiting upstream submission.
+    `BaseRiscVMmuLib.c`, found during the riscv64 firmware audit.
+    **Submitted upstream as
+    [tianocore/edk2#12650](https://github.com/tianocore/edk2/pull/12650).**
   - [`docs/edk2-riscv64-getmemorymap-null-deref.patch`](https://github.com/cloud-boot/docs/blob/main/edk2-riscv64-getmemorymap-null-deref.patch)
     — NULL `DescriptorVersion` deref fix in EDK2's `CoreGetMemoryMap`
     on riscv64; awaiting upstream submission.
