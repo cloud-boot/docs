@@ -1,0 +1,180 @@
+diff --git a/goos/goos_loong64.s b/goos/goos_loong64.s
+new file mode 100644
+index 0000000..325bdb9
+--- /dev/null
++++ b/goos/goos_loong64.s
+@@ -0,0 +1,12 @@
++// Custom GOOS support
++// https://github.com/usbarmory/tamago
++//
++// Copyright (c) The TamaGo Authors. All Rights Reserved.
++//
++// Use of this source code is governed by the license
++// that can be found in the LICENSE file.
++
++#include "textflag.h"
++
++TEXT ·CPUInit(SB),NOSPLIT|NOFRAME,$0
++	JMP	cpuinit(SB)
+diff --git a/loong64/counter.go b/loong64/counter.go
+new file mode 100644
+index 0000000..28f8b8e
+--- /dev/null
++++ b/loong64/counter.go
+@@ -0,0 +1,28 @@
++// LoongArch stable-timer access (for monotonic time + RNG seeding).
++
++package loong64
++
++// counter returns the raw stable-timer counter (RDTIMED).
++func counter() int64
++
++// cpucfg returns CPUCFG[reg].
++func cpucfg(reg uint32) uint32
++
++// Counter returns the monotonic stable-timer counter.
++func Counter() int64 { return counter() }
++
++// CounterFreq returns the stable-timer frequency in Hz, derived from CPUCFG:
++// freq = cc_freq(word4) * cc_mul / cc_div (word5[15:0] / word5[31:16]).
++func CounterFreq() int64 {
++	base := int64(cpucfg(4))
++	if base == 0 {
++		return 100_000_000 // QEMU 'virt' default
++	}
++	cfg5 := cpucfg(5)
++	mul := int64(cfg5 & 0xffff)
++	div := int64((cfg5 >> 16) & 0xffff)
++	if mul == 0 || div == 0 {
++		return base
++	}
++	return base * mul / div
++}
+diff --git a/loong64/counter.s b/loong64/counter.s
+new file mode 100644
+index 0000000..03d0074
+--- /dev/null
++++ b/loong64/counter.s
+@@ -0,0 +1,14 @@
++#include "textflag.h"
++
++// func counter() int64
++TEXT ·counter(SB),NOSPLIT,$0-8
++	RDTIMED	R0, R4
++	MOVV	R4, ret+0(FP)
++	RET
++
++// func cpucfg(reg uint32) uint32
++TEXT ·cpucfg(SB),NOSPLIT,$0-12
++	MOVW	reg+0(FP), R5
++	CPUCFG	R5, R4
++	MOVW	R4, ret+8(FP)
++	RET
+diff --git a/loong64/exception.s b/loong64/exception.s
+new file mode 100644
+index 0000000..c32f5c2
+--- /dev/null
++++ b/loong64/exception.s
+@@ -0,0 +1,19 @@
++#include "textflag.h"
++
++// exceptionEntry is the CSR.EENTRY target. POC: announce a fault on the QEMU
++// 'virt' UART ("EXC\n") and halt — so exceptions are visible instead of a
++// silent jump to 0. A real port aligns this to 4 KiB, dispatches on ESTAT
++// (timer IRQ -> preempt; faults -> panic), and uses a registered console hook
++// instead of hardcoding the UART.
++TEXT ·exceptionEntry(SB),NOSPLIT|NOFRAME,$0
++	MOVV	$0x1fe001e0, R12
++	MOVV	$69, R13	// 'E'
++	MOVB	R13, (R12)
++	MOVV	$88, R13	// 'X'
++	MOVB	R13, (R12)
++	MOVV	$67, R13	// 'C'
++	MOVB	R13, (R12)
++	MOVV	$10, R13	// '\n'
++	MOVB	R13, (R12)
++halt:
++	JMP	halt
+diff --git a/loong64/init.go b/loong64/init.go
+new file mode 100644
+index 0000000..60ab486
+--- /dev/null
++++ b/loong64/init.go
+@@ -0,0 +1,11 @@
++package loong64
++
++import (
++	_ "unsafe"
++)
++
++// Init takes care of the lower level initialization triggered before runtime
++// setup (pre World start).
++//
++//go:linkname Init runtime/goos.Hwinit0
++func Init() {}
+diff --git a/loong64/init.s b/loong64/init.s
+new file mode 100644
+index 0000000..38d3c68
+--- /dev/null
++++ b/loong64/init.s
+@@ -0,0 +1,6 @@
++//go:build !linkcpuinit
++
++#include "textflag.h"
++
++TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
++	JMP	github·com∕usbarmory∕tamago∕loong64·Init(SB)
+diff --git a/loong64/loong64.go b/loong64/loong64.go
+new file mode 100644
+index 0000000..f23ade5
+--- /dev/null
++++ b/loong64/loong64.go
+@@ -0,0 +1,12 @@
++// LoongArch 64-bit processor support
++// https://github.com/usbarmory/tamago
++//
++// Use of this source code is governed by the license
++// that can be found in the LICENSE file.
++
++// Package loong64 provides minimal LoongArch64 bare-metal support for
++// GOOS=tamago GOARCH=loong64 (experimental).
++package loong64
++
++// defined in loong64.s
++func exit(int32)
+diff --git a/loong64/loong64.s b/loong64/loong64.s
+new file mode 100644
+index 0000000..6a96766
+--- /dev/null
++++ b/loong64/loong64.s
+@@ -0,0 +1,30 @@
++#include "textflag.h"
++
++// Init is the bring-up entry. QEMU 'virt' enters a -kernel ELF in
++// direct-address (DA) mode (VA==PA), so for a first bring-up we enable the FPU
++// (LoongArch boots with it disabled), set the stack pointer (R3) to the top of
++// the RAM region, and enter the Go runtime.
++TEXT ·Init(SB),NOSPLIT|NOFRAME,$0
++	// enable the FPU: CSR.EUEN.FPE = 1 (EUEN is CSR 0x2). Go's loong64
++	// assembler has no csrwr mnemonic, so encode it directly:
++	//   csrwr R19, 0x2   =>  0x04000000 | (0x2<<10) | (1<<5) | 19
++	MOVV	$1, R19
++	WORD	$0x04000833
++
++	// install exception vector: CSR.EENTRY (0xc) = exceptionEntry
++	//   csrwr R12, 0xc  =>  0x04000000 | (0xc<<10) | (1<<5) | 12
++	MOVV	$·exceptionEntry(SB), R12
++	WORD	$0x0400302c
++
++	// set stack pointer to top of RAM minus the stack offset
++	MOVV	runtime∕goos·RamStart(SB), R3
++	MOVV	runtime∕goos·RamSize(SB), R19
++	MOVV	runtime∕goos·RamStackOffset(SB), R20
++	ADDV	R19, R3
++	SUBV	R20, R3
++	JMP	_rt0_tamago_start(SB)
++
++// func exit(int32)
++TEXT ·exit(SB),NOSPLIT,$0-8
++loop:
++	JMP	loop

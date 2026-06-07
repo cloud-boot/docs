@@ -1,0 +1,67 @@
+Proposed upstream change to usbarmory/tamago that would let UEFI consumers
+reuse the framework's per-arch CPU packages (arm64, loong64) without
+forking.
+
+Status: NOT applied to the cloud-boot working clone, NOT required for the
+cloud-boot/tamago-uefi build (which sidesteps the issue by not importing
+the framework's per-arch packages at all and reimplementing the small
+set of hooks it needs in `uefiboard/board_<arch>.{go,s}`).
+
+This patch is kept here as a design sketch for the eventual upstream PR
+that would close the "framework arm64.Init is incompatible with UEFI"
+gap noted in cloud-boot/tamago-uefi#README.
+
+Two changes, both gated behind -tags linkhwinit0 so a clean `go build`
+(no tags) still produces the upstream bare-metal behavior:
+
+  1. arm64/init.go gets a `//go:build !linkhwinit0` constraint so the
+     framework's `arm64.Init` (linkname'd `runtime/goos.Hwinit0`) is
+     compiled out when a UEFI board supplies its own Hwinit0.
+
+     Why we need this: under UEFI on AArch64 the firmware has already
+     set up the MMU (Normal/Cacheable RAM + Device MMIO mappings) and
+     the code/data we run from depends on those mappings. `Init` calls
+     `cpu.InitMMU()` which rebuilds EL1 page tables from scratch and
+     clobbers the firmware's mappings, hanging bring-up immediately.
+     The board's Hwinit0 instead calls `gBS->AllocatePages` to obtain
+     a guaranteed-writable heap chunk and wires `goos.RamStart` +
+     `goos.Bloc` to it before `osinit` runs.
+
+  2. loong64/init.go gets the same `//go:build !linkhwinit0` constraint
+     so the local loong64 framework staging (cloud-boot-local; not in
+     upstream yet, cf. usbarmory/tamago#70) doesn't fight a UEFI board
+     for ownership of `runtime/goos.Hwinit0`.
+
+Mirrors the existing `!linkcpuinit` and `!linkramstart` pattern; see the
+framework's README for the build-tag conventions.
+
+diff --git a/arm64/init.go b/arm64/init.go
+index c9c2caf..e5a9810 100644
+--- a/arm64/init.go
++++ b/arm64/init.go
+@@ -6,6 +6,12 @@
+ // Use of this source code is governed by the license
+ // that can be found in the LICENSE file.
+
++// cloud-boot UEFI carve-out: under -tags linkhwinit0 this file is
++// dropped so a board can provide its own goos.Hwinit0 linkname.
++// Mirrors the existing -tags linkcpuinit / linkramstart pattern.
++
++//go:build !linkhwinit0
++
+ package arm64
+
+ import (
+diff --git a/loong64/init.go b/loong64/init.go
+index 60ab486..a4f1c19 100644
+--- a/loong64/init.go
++++ b/loong64/init.go
+@@ -1,3 +1,8 @@
++// cloud-boot UEFI carve-out: under -tags linkhwinit0 this file is
++// dropped so a board can provide its own goos.Hwinit0 linkname.
++
++//go:build !linkhwinit0
++
+ package loong64
+
+ import (

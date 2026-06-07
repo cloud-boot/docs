@@ -1,0 +1,12 @@
+# mkdocs build output
+site/
+
+# python virtualenv
+.venv/
+__pycache__/
+*.pyc
+
+# Go test artifacts
+*.test
+*.out
+coverage.out

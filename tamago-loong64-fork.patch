@@ -1,0 +1,202 @@
+diff --git a/src/cmd/dist/build.go b/src/cmd/dist/build.go
+index f832874e..89d272b5 100644
+--- a/src/cmd/dist/build.go
++++ b/src/cmd/dist/build.go
+@@ -1817,6 +1817,7 @@ var cgoEnabled = map[string]bool{
+ 	"tamago/arm":      false,
+ 	"tamago/arm64":    false,
+ 	"tamago/riscv64":  false,
++	"tamago/loong64":  false,
+ 	"windows/386":     true,
+ 	"windows/amd64":   true,
+ 	"windows/arm64":   true,
+diff --git a/src/cmd/link/internal/loong64/obj.go b/src/cmd/link/internal/loong64/obj.go
+index 5489b4c6..4a60dd1f 100644
+--- a/src/cmd/link/internal/loong64/obj.go
++++ b/src/cmd/link/internal/loong64/obj.go
+@@ -52,7 +52,7 @@ func archinit(ctxt *ld.Link) {
+ 	switch ctxt.HeadType {
+ 	default:
+ 		ld.Exitf("unknown -H option: %v", ctxt.HeadType)
+-	case objabi.Hlinux: /* loong64 elf */
++	case objabi.Hlinux, objabi.Htamago: /* loong64 elf */
+ 		ld.Elfinit(ctxt)
+ 		ld.HEADR = ld.ELFRESERVE
+ 		if *ld.FlagRound == -1 {
+diff --git a/src/internal/cpu/cpu_loong64_other.go b/src/internal/cpu/cpu_loong64_other.go
+new file mode 100644
+index 00000000..9b8f4ab7
+--- /dev/null
++++ b/src/internal/cpu/cpu_loong64_other.go
+@@ -0,0 +1,12 @@
++// Copyright 2024 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build loong64 && !linux
++
++package cpu
++
++func osInit() {
++	// Other operating systems (e.g. tamago, bare metal) do not expose the
++	// Linux HWCAP for optional LoongArch features.
++}
+diff --git a/src/internal/platform/zosarch.go b/src/internal/platform/zosarch.go
+index af517c43..69b9b4f1 100644
+--- a/src/internal/platform/zosarch.go
++++ b/src/internal/platform/zosarch.go
+@@ -58,6 +58,7 @@ var List = []OSArch{
+ 	{"tamago", "arm"},
+ 	{"tamago", "arm64"},
+ 	{"tamago", "riscv64"},
++	{"tamago", "loong64"},
+ 	{"wasip1", "wasm"},
+ 	{"windows", "386"},
+ 	{"windows", "amd64"},
+@@ -115,6 +116,7 @@ var distInfo = map[OSArch]osArchInfo{
+ 	{"tamago", "arm"}:      {},
+ 	{"tamago", "arm64"}:    {},
+ 	{"tamago", "riscv64"}:  {},
++	{"tamago", "loong64"}:  {},
+ 	{"wasip1", "wasm"}:     {},
+ 	{"windows", "386"}:     {CgoSupported: true, FirstClass: true},
+ 	{"windows", "amd64"}:   {CgoSupported: true, FirstClass: true},
+diff --git a/src/runtime/os_tamago_loong64.go b/src/runtime/os_tamago_loong64.go
+new file mode 100644
+index 00000000..7b98865b
+--- /dev/null
++++ b/src/runtime/os_tamago_loong64.go
+@@ -0,0 +1,30 @@
++// Copyright 2019 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build tamago && loong64
++
++package runtime
++
++import "runtime/goos"
++
++// defined in asm_loong64.s
++func cputicks() int64
++
++// MemRegion returns the start and end addresses of the physical RAM assigned
++// to the Go runtime.
++func MemRegion() (start uint64, end uint64) {
++	return uint64(goos.RamStart), uint64(goos.RamStart + goos.RamSize)
++}
++
++// TextRegion returns the start and end addresses of the physical RAM
++// containing the Go runtime executable instructions.
++func TextRegion() (start uint64, end uint64) {
++	return uint64(firstmoduledata.text), uint64(firstmoduledata.etext)
++}
++
++// DataRegion returns the start and end addresses of the physical RAM
++// containing the Go runtime global symbols.
++func DataRegion() (start uint64, end uint64) {
++	return uint64(firstmoduledata.data), uint64(firstmoduledata.enoptrbss)
++}
+diff --git a/src/runtime/rt0_tamago_loong64.s b/src/runtime/rt0_tamago_loong64.s
+new file mode 100644
+index 00000000..6f836519
+--- /dev/null
++++ b/src/runtime/rt0_tamago_loong64.s
+@@ -0,0 +1,14 @@
++// Copyright 2022 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++#include "textflag.h"
++
++// entry point
++TEXT _rt0_loong64_tamago(SB),NOSPLIT|NOFRAME,$0
++	// CPUInit must be provided externally by the linked application for
++	// CPU initialization, it must call _rt0_tamago_start at completion
++	JMP	runtime∕goos·CPUInit(SB)
++
++TEXT _rt0_tamago_start(SB),NOSPLIT|NOFRAME,$0
++	JMP	runtime·rt0_loong64_tamago(SB)
+diff --git a/src/runtime/sys_tamago_loong64.s b/src/runtime/sys_tamago_loong64.s
+new file mode 100644
+index 00000000..9f4fc400
+--- /dev/null
++++ b/src/runtime/sys_tamago_loong64.s
+@@ -0,0 +1,77 @@
++// Copyright 2022 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//
++// System calls and other sys.stuff for loong64, tamago
++//
++
++#include "go_asm.h"
++#include "go_tls.h"
++#include "textflag.h"
++
++TEXT runtime·rt0_loong64_tamago(SB),NOSPLIT|NOFRAME,$0
++	// create istack out of the bootstack (R3 = stack pointer)
++	MOVV	$runtime·g0(SB), g
++	MOVV	$(-64*1024), R30
++	ADDV	R30, R3, R19
++	MOVV	R19, g_stackguard0(g)
++	MOVV	R19, g_stackguard1(g)
++	MOVV	R19, (g_stack+stack_lo)(g)
++	MOVV	R3, (g_stack+stack_hi)(g)
++
++	// set the per-goroutine and per-mach "registers"
++	MOVV	$runtime·m0(SB), R19
++
++	// save m->g0 = g0
++	MOVV	g, m_g0(R19)
++	// save m0 to g0->m
++	MOVV	R19, g_m(g)
++
++	JAL	runtime·hwinit0(SB)
++	JAL	runtime·check(SB)
++	JAL	runtime·osinit(SB)
++	JAL	runtime·schedinit(SB)
++	JAL	runtime·hwinit1(SB)
++
++	// create a new goroutine to start program
++	MOVV	$runtime·mainPC(SB), R19	// entry
++	ADDV	$-16, R3
++	MOVV	R19, 8(R3)
++	MOVV	R0, 0(R3)
++	JAL	runtime·newproc(SB)
++	ADDV	$16, R3
++
++	// start this M
++	JAL	runtime·mstart(SB)
++
++	WORD	$0 // crash if reached
++	RET
++
++// func GetG() (gp uint, pp uint)
++TEXT runtime·GetG(SB),NOSPLIT,$0-16
++	MOVV	g, gp+0(FP)
++
++	MOVV	(g_m)(g), R19
++	MOVV	(m_p)(R19), R19
++	MOVV	R19, pp+8(FP)
++
++	RET
++
++// WakeG: time.Sleep fast-path optimization. Stubbed to always report failure
++// (R12 != 0), so callers fall back to the normal scheduler path. Correct for a
++// minimal bring-up that does not exercise the cached-timer wake path.
++//
++//   * input  R12: G pointer
++//   * output R12: success (0), failure (1)
++TEXT runtime·WakeG(SB),NOSPLIT,$0-0
++	MOVV	$1, R12
++	RET
++
++// func Wake(gp uint) bool
++TEXT runtime·Wake(SB),$0-9
++	MOVV	gp+0(FP), R12
++	JAL	runtime·WakeG(SB)
++	XOR	$1, R12, R12
++	MOVV	R12, ret+8(FP)
++	RET

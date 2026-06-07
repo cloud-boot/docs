@@ -1,0 +1,35 @@
+/* cloud-boot docs — small overrides on top of mkdocs-material */
+
+/* Wider content column on large screens so the wide tables and
+   diagrams aren't squeezed. */
+@media (min-width: 76.25em) {
+  .md-grid {
+    max-width: 70rem;
+  }
+}
+
+/* Make admonition borders thinner — matches the rest of the site. */
+.md-typeset .admonition {
+  border-left-width: 3px;
+}
+
+/* Subtle gradient on the top nav matching the landing page's vibe. */
+.md-header {
+  background-image: linear-gradient(
+    135deg,
+    var(--md-primary-fg-color) 0%,
+    var(--md-accent-fg-color) 110%
+  );
+}
+
+/* Tighter code blocks inside tables — they get squeezed otherwise. */
+.md-typeset table code {
+  white-space: nowrap;
+  padding: 0.1em 0.4em;
+}
+
+/* The big symptom/cause tables in `raid.md` and `*-troubleshooting`
+   benefit from looser line-height. */
+.md-typeset table:not([class]) td {
+  line-height: 1.6;
+}

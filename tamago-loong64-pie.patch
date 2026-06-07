@@ -1,0 +1,154 @@
+# cloud-boot-LOCAL overlay — DO NOT propose upstream.
+#
+# These edits enable `-buildmode=pie` for tamago/loong64 in the tamago-go
+# fork. They are deliberately kept OUT of the upstream loong64 proposal
+# (tamago-go PR usbarmory/tamago-go#17 and tamago-loong64-fork.patch):
+# usbarmory/tamago's maintainer asked to keep any binary modification
+# *external* and to tackle PIE separately, so as not to jeopardise the
+# in-flight loong64 upstreaming (see usbarmory/tamago#70).
+#
+# cloud-boot therefore maintains PIE as its own build overlay: apply this
+# on top of tamago-loong64-fork.patch when building the tamago-go used to
+# emit a relocatable image for the external go-coff `pectl link-pie`
+# ELF(PIE)->PE32+/EFI wrapper. Upstream tamago-go stays PIE-free.
+#
+# Apply order:
+#   1. tamago-loong64-fork.patch   (upstream-shaped, PIE-free)
+#   2. tamago-loong64-pie.patch    (this file, cloud-boot-local)
+#
+diff --git a/src/cmd/internal/obj/x86/asm6.go b/src/cmd/internal/obj/x86/asm6.go
+index b7bd57b7..bc547415 100644
+--- a/src/cmd/internal/obj/x86/asm6.go
++++ b/src/cmd/internal/obj/x86/asm6.go
+@@ -2541,7 +2541,13 @@ func prefixof(ctxt *obj.Link, a *obj.Addr) int {
+ 			default:
+ 				log.Fatalf("unknown TLS base register for %v", ctxt.Headtype)
+
+-			case objabi.Hlinux, objabi.Htamago:
++			case objabi.Htamago:
++				// Bare metal: a fixed local-exec TLS in %FS, even under the
++				// -shared codegen that -buildmode=pie uses (no dynamic linker
++				// provides a TLS base, so there is nothing to relax against).
++				return 0x64 // FS
++
++			case objabi.Hlinux:
+ 				if isAndroid {
+ 					return 0x64 // FS
+ 				}
+diff --git a/src/cmd/link/internal/arm64/asm.go b/src/cmd/link/internal/arm64/asm.go
+index 98645d11..68939a69 100644
+--- a/src/cmd/link/internal/arm64/asm.go
++++ b/src/cmd/link/internal/arm64/asm.go
+@@ -950,7 +950,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
+ 			// We are linking the final executable, so we
+ 			// can optimize any TLS IE relocation to LE.
+
+-			if !target.IsLinux() {
++			if !target.IsLinux() && !target.IsTamago() {
+ 				ldr.Errorf(s, "TLS reloc on unsupported OS %v", target.HeadType)
+ 			}
+
+diff --git a/src/cmd/link/internal/ld/target.go b/src/cmd/link/internal/ld/target.go
+index d0ce99f3..102139b8 100644
+--- a/src/cmd/link/internal/ld/target.go
++++ b/src/cmd/link/internal/ld/target.go
+@@ -146,6 +146,11 @@ func (t *Target) IsDarwin() bool {
+ 	return t.HeadType == objabi.Hdarwin
+ }
+
++func (t *Target) IsTamago() bool {
++	t.mustSetHeadType()
++	return t.HeadType == objabi.Htamago
++}
++
+ func (t *Target) IsWindows() bool {
+ 	t.mustSetHeadType()
+ 	return t.HeadType == objabi.Hwindows
+diff --git a/src/cmd/link/internal/loong64/asm.go b/src/cmd/link/internal/loong64/asm.go
+index 142578bc..3b5edbe1 100644
+--- a/src/cmd/link/internal/loong64/asm.go
++++ b/src/cmd/link/internal/loong64/asm.go
+@@ -559,7 +559,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
+ 	case objabi.R_LOONG64_TLS_IE_HI,
+ 		objabi.R_LOONG64_TLS_IE_LO:
+ 		if target.IsPIE() && target.IsElf() {
+-			if !target.IsLinux() {
++			if !target.IsLinux() && !target.IsTamago() {
+ 				ldr.Errorf(s, "TLS reloc on unsupported OS %v", target.HeadType)
+ 			}
+ 			t := ldr.SymAddr(rs) + r.Add()
+diff --git a/src/internal/platform/supported.go b/src/internal/platform/supported.go
+index 778d7270..3c644ca2 100644
+--- a/src/internal/platform/supported.go
++++ b/src/internal/platform/supported.go
+@@ -189,6 +189,7 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
+ 			"ios/amd64", "ios/arm64",
+ 			"aix/ppc64",
+ 			"openbsd/arm64",
++			"tamago/amd64", "tamago/arm64", "tamago/loong64", "tamago/riscv64",
+ 			"windows/386", "windows/amd64", "windows/arm64":
+ 			return true
+ 		}
+@@ -221,6 +222,7 @@ func InternalLinkPIESupported(goos, goarch string) bool {
+ 	case "android/arm64",
+ 		"darwin/amd64", "darwin/arm64",
+ 		"linux/amd64", "linux/arm64", "linux/loong64", "linux/ppc64le",
++		"tamago/amd64", "tamago/arm64", "tamago/loong64", "tamago/riscv64",
+ 		"windows/386", "windows/amd64", "windows/arm64":
+ 		return true
+ 	}
+diff --git a/src/cmd/internal/obj/riscv/obj.go b/src/cmd/internal/obj/riscv/obj.go
+--- a/src/cmd/internal/obj/riscv/obj.go
++++ b/src/cmd/internal/obj/riscv/obj.go
+@@ -4945,7 +4945,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
+ 				break
+ 			}
+ 			if addr.Sym.Type == objabi.STLSBSS {
+-				if ctxt.Flag_shared {
++				if ctxt.Flag_shared && ctxt.Headtype != objabi.Htamago {
++					// Bare metal: no dynamic linker, so the
++					// shared/PIE codegen still wants local-exec
++					// TLS — emit R_RISCV_TLS_LE even under
++					// Flag_shared so the internal linker can
++					// resolve it without an IE→LE relax path.
+ 					rt = objabi.R_RISCV_TLS_IE
+ 				} else {
+ 					rt = objabi.R_RISCV_TLS_LE
+diff --git a/src/cmd/link/internal/riscv64/asm.go b/src/cmd/link/internal/riscv64/asm.go
+--- a/src/cmd/link/internal/riscv64/asm.go
++++ b/src/cmd/link/internal/riscv64/asm.go
+@@ -195,6 +195,46 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
+ 		su.SetRelocAdd(rIdx, int64(ldr.SymPlt(targ)))
+
+ 		return true
++
++	case objabi.R_ADDR:
++		// Process dynamic relocations for the data sections, mirroring
++		// the amd64/arm64/loong64 handling: under internal PIE linking,
++		// every R_ADDR on a data/rodata symbol becomes an
++		// R_RISCV_RELATIVE dynamic relocation so the loader (or, in
++		// our TamaGo+PIE→PE32+/EFI flow, peln's link-pie + UEFI's
++		// base relocator) can rebase the image.
++		if target.IsPIE() && target.IsInternal() {
++			switch ldr.SymName(s) {
++			case ".dynsym", ".rela", ".rela.plt", ".got.plt", ".dynamic":
++				return false
++			}
++		} else {
++			if t := ldr.SymType(s); !t.IsDATA() && !t.IsRODATA() {
++				break
++			}
++		}
++
++		if target.IsElf() {
++			rela := ldr.MakeSymbolUpdater(syms.Rela)
++			rela.AddAddrPlus(target.Arch, s, int64(r.Off()))
++			if r.Siz() == 8 {
++				rela.AddUint64(target.Arch, elf.R_INFO(0, uint32(elf.R_RISCV_RELATIVE)))
++			} else {
++				ldr.Errorf(s, "unexpected relocation for dynamic symbol %s", ldr.SymName(targ))
++			}
++			rela.AddAddrPlus(target.Arch, targ, r.Add())
++			return true
++		}
+ 	}

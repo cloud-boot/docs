@@ -1,0 +1,55 @@
+From ac09a94ab7fa5b63976c21bbc74342a40035753b Mon Sep 17 00:00:00 2001
+From: David Delavennat <david.delavennat@polytechnique.edu>
+Date: Sun, 7 Jun 2026 08:22:48 +0200
+Subject: [PATCH] UefiCpuPkg/BaseRiscVMmuLib: fix bitwise-vs-logical typo in
+ SetPpnToPte ASSERT
+
+SetPpnToPte() is supposed to assert that no bits of the encoded
+physical page number fall outside PTE_PPN_MASK. The intended
+expression is the same idiom used a few lines below in
+RiscVMmuSetSatpMode():
+
+    ASSERT (!(Ppn & ~(SATP64_PPN)));
+
+but the version in SetPpnToPte() uses bitwise NOT instead of
+logical NOT:
+
+    ASSERT (~(Ppn & ~PTE_PPN_MASK));
+
+~(Ppn & ~PTE_PPN_MASK) is zero only when (Ppn & ~PTE_PPN_MASK) is
+~(UINT64)0, which is impossible: Ppn was built by shifting Address
+right by RISCV_MMU_PAGE_SHIFT and then left by PTE_PPN_SHIFT, so its
+low bits are always clear. The assertion therefore always passes
+regardless of whether the PPN actually fits, and a too-large physical
+address would silently truncate.
+
+In a DEBUG build the assert is still effectively a no-op; in a
+RELEASE build it is compiled out entirely. Replace the bitwise NOT
+with a logical NOT so the assert behaves as the surrounding code
+clearly intended.
+
+No functional change in RELEASE builds. In DEBUG builds the assert
+now correctly fires if a caller passes an address whose PPN field
+does not fit in PTE_PPN_MASK.
+
+Signed-off-by: David Delavennat <david.delavennat@polytechnique.edu>
+---
+ UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c b/UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c
+index 34300dc..3415e00 100644
+--- a/UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c
++++ b/UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c
+@@ -240,7 +240,7 @@ SetPpnToPte (
+   UINT64  Ppn;
+ 
+   Ppn = ((Address >> RISCV_MMU_PAGE_SHIFT) << PTE_PPN_SHIFT);
+-  ASSERT (~(Ppn & ~PTE_PPN_MASK));
++  ASSERT (!(Ppn & ~PTE_PPN_MASK));
+   Entry &= ~PTE_PPN_MASK;
+   return Entry | Ppn;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

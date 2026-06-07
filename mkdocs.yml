@@ -1,0 +1,140 @@
+site_name: cloud-boot
+site_description: >-
+  Boot unmodified cloud images on KVM/QEMU, Apple
+  Virtualization.framework, and OpenStack — six Linux families,
+  three BSDs, Windows via DevicePath handoff. UEFI + TinyGo +
+  pure-Go filesystem drivers, no kexec required.
+site_url: https://cloud-boot.github.io/docs/
+site_author: cloud-boot contributors
+
+repo_name: cloud-boot/cloud-boot
+repo_url: https://github.com/cloud-boot
+edit_uri: edit/main/docs/docs/
+
+copyright: BSD-3-Clause &middot; cloud-boot contributors
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  palette:
+    - media: "(prefers-color-scheme)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: "#"
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.tilde
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - architecture/index.md
+      - Three boot paths: architecture/three-paths.md
+      - Components: architecture/components.md
+      - Hypervisor matrix: architecture/hypervisors.md
+  - Filesystem drivers:
+      - filesystems/index.md
+      - ext4: filesystems/ext4.md
+      - XFS: filesystems/xfs.md
+      - btrfs (incl. RAID): filesystems/btrfs.md
+      - ZFS (incl. RAID-Z): filesystems/zfs.md
+      - LUKS (full-disk encryption): filesystems/luks.md
+      - Multi-device discovery: filesystems/raid.md
+  - Tutorials:
+      - tutorials/index.md
+      - Quickstart - QEMU/KVM: tutorials/qemu.md
+      - Quickstart - Apple VZ (vfkit): tutorials/vfkit.md
+      - OpenStack with Keystone AC: tutorials/openstack.md
+      - Multi-arch ISO (x86_64 + arm64 + riscv64): tutorials/multi-arch-iso.md
+  - Reference:
+      - reference/index.md
+      - Kernel cmdline (cloudboot.*): reference/cmdline.md
+      - Plan HCL schema: reference/plan-hcl.md
+      - metadata-URL JSON: reference/metadata-url.md
+      - BSD targets (FreeBSD/NetBSD/OpenBSD): reference/bsd-targets.md
+      - Windows target: reference/windows-target.md
+      - NVRAM reset: reference/nvram-reset.md
+  - Internals:
+      - internals/index.md
+      - On-disk format fixes: internals/on-disk-formats.md
+      - btrfs multi-device routing: internals/multi-device-btrfs.md
+      - ZFS multi-vdev + RAID-Z: internals/multi-vdev-zfs.md
+      - vdev label NVList: internals/vdev-tree-nvlist.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/cloud-boot
+      name: cloud-boot on GitHub
+  generator: false
+  version:
+    provider: mike
+    default: latest
