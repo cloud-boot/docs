@@ -1,5 +1,5 @@
 From ac09a94ab7fa5b63976c21bbc74342a40035753b Mon Sep 17 00:00:00 2001
-From: David Delavennat <david.delavennat@polytechnique.edu>
+From: David Delavennat <tannevaled@users.noreply.github.com>
 Date: Sun, 7 Jun 2026 08:22:48 +0200
 Subject: [PATCH] UefiCpuPkg/BaseRiscVMmuLib: fix bitwise-vs-logical typo in
  SetPpnToPte ASSERT
@@ -32,7 +32,7 @@ No functional change in RELEASE builds. In DEBUG builds the assert
 now correctly fires if a caller passes an address whose PPN field
 does not fit in PTE_PPN_MASK.
 
-Signed-off-by: David Delavennat <david.delavennat@polytechnique.edu>
+Signed-off-by: David Delavennat <tannevaled@users.noreply.github.com>
 ---
  UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

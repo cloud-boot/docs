@@ -187,10 +187,15 @@ toggling in `RiscVMmuSetSatpMode`, not `SetPpnToPte`.
       (he is the author of much of `BaseRiscVMmuLib.c`).
     * Andrei Warkentin `<andrei.warkentin@intel.com>` - additional
       RISC-V reviewer.
-* **DCO**: the patch carries a real `Signed-off-by` per upstream
-  policy (`david.delavennat@polytechnique.edu`); the GitHub noreply
-  alias is not used because the EDK2 DCO requires a verifiable
-  identity.
+* **DCO**: the patch carries a `Signed-off-by` using the project's
+  canonical commit identity, `David Delavennat
+  <tannevaled@users.noreply.github.com>`. GitHub `users.noreply`
+  addresses are accepted in DCO sign-offs (the DCO certifies origin,
+  not email reachability), and project policy is that the
+  institutional address is never used on public artifacts. If a
+  reviewer on `devel@edk2.groups.io` insists on a differently
+  reachable address, escalate that decision rather than substituting
+  one unilaterally.
 * **No `Co-Authored-By` trailer**: EDK2 does not accept co-author
   trailers; only `Signed-off-by` is expected.
 * **Timing**: hold the submission until cloud-boot has reviewed the
