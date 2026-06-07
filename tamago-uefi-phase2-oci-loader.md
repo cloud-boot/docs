@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c diagnosed as Case IV — VZ device never reads avail-ring from a UEFI-context client; M2.1 SNP wrapper is the recommended Apple-VZ road)
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c diagnosed as Case IV — VZ host-side virtio-net never reads the avail ring from a UEFI-context client. SNP is NOT a viable VZ workaround — VZ doesn't publish SNP per the §3 capability matrix. Two empirical paths under live test on parallel branches: (A) accept VIRTIO_F_RING_PACKED + implement packed-ring virtqueue; (B) defer virtio-net init to post-ExitBootServices and drive the device via direct MMIO from bare metal. Whichever wins becomes the VZ rail.)
 last-updated: 2026-06-07
 ---
 
