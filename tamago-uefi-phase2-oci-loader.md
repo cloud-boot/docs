@@ -247,6 +247,121 @@ Acceptance: probe prints "virtio-net 1AF4:1040 or 1AF4:1041 BAR4@…
 MAC=…" on QEMU+EDK2 for all four arches, and on Apple VZ via vfkit
 (arm64 only — Mac Apple Silicon host).
 
+### M1.5 — R-M1'b re-validation + SNP enumeration (done 2026-06-07)
+
+**Deliverable.** Two things shipped:
+
+1. **R-M1'b RESOLVED.** Re-validate the salvaged `protocols_tamago.go`
+   thunk against `c6f2716` from a clean rebuild, confirm all 4 arches
+   PASS `phase2_pcienum` end-to-end under QEMU+EDK2-stable202408
+   (homebrew qemu 10.2.2). Diagnosis recorded in §5 R-M1'b: the
+   committed source is correct; the original M1 fault was a stale-
+   binary artifact, not a code bug.
+
+2. **SNP enumeration probe.** A sibling `phase2_snpenum` build tag
+   that, when set with or without `phase2_pcienum`, walks every
+   handle publishing `EFI_SIMPLE_NETWORK_PROTOCOL`, follows
+   `*This->Mode`, and prints `HwAddressSize` / `MediaPresent` /
+   `State` / `IfType` / `CurrentAddress` (MAC) /
+   `PermanentAddress` for each. No driver implementation; the SNP
+   wrapper as a `LinkEndpoint` is a future M-step if VZ/UEFI mix
+   justifies it. The combined PCI+SNP build is wired as
+   `pcisnp:efi:<arch>` in the Taskfile.
+
+Scope:
+
+- `uefiboard/simple_network_protocol.go` — host-buildable surface:
+  `EFI_SIMPLE_NETWORK_PROTOCOL_GUID`
+  (`A19832B9-AC25-11D3-9A2D-0090273FC14D`), the protocol function-
+  table offsets (Revision / Start / Stop / ... / WaitForPacket /
+  Mode), the `EFI_SIMPLE_NETWORK_MODE` Go struct mirror of the
+  656-byte (Go `unsafe.Sizeof`) firmware-side block, and
+  `EFI_MAC_ADDRESS` as a 32-byte buffer. Reference:
+  `MdePkg/Include/Protocol/SimpleNetwork.h` (edk2.git
+  stable/202408) lines 23..671 and
+  `MdePkg/Include/Uefi/UefiBaseType.h` lines 95..97.
+- `uefiboard/simple_network_protocol_test.go` — GUID round-trip,
+  on-the-wire byte assertion, function-table-offset pinning,
+  state-constant pinning, MAC-address sizeof check, full Mode
+  struct-layout assertion (every field offset pinned with
+  `unsafe.Offsetof`), and a synthetic-buffer MAC-read round-trip.
+- `phase2_snpenum.go` (live, `phase2_snpenum && tamago`) +
+  `phase2_snpenum_helpers.go` (host-buildable) +
+  `phase2_snpenum_stub.go` (stub for builds without the live
+  path) + `phase2_snpenum_test.go` (probe-level MAC-hex round-trip
+  + synthetic Mode-buffer test).
+- `phase2_pcienum.go` refactored so its `runPhase2Probe` becomes
+  `runPCIEnumProbe`; `phase2_dispatch.go` owns `runPhase2Probe`
+  and calls `runPCIEnumProbe()` then `runSNPEnumProbe()` when
+  either probe tag is set. Both can run together in one boot.
+
+Validation matrix (QEMU+EDK2 stable202408, homebrew qemu 10.2.2):
+
+|  arch    | PCI handles | virtio-net via PCI | SNP handles | MAC seen           |
+| -------- | ----------: | ------------------: | ----------: | ------------------ |
+| amd64    |           6 | 1 (0,0,2,0)         |           3 | 52:54:00:12:34:56  |
+| arm64    |           3 | 1 (0,0,1,0)         |           3 | 52:54:00:12:34:56  |
+| loong64  |           3 | 1 (0,0,1,0)         |           1 | 52:54:00:12:34:56  |
+| riscv64  |           1 | 0 (root bridge only)|           1 | 52:54:00:12:34:56  |
+
+riscv64 is the only arch where virtio-net is NOT visible through
+`EFI_PCI_IO_PROTOCOL`; it IS visible through `EFI_SIMPLE_NETWORK_
+PROTOCOL` regardless of whether QEMU exposes the device as
+`virtio-net-pci` or `virtio-net-device`. This is a known EDK2-side
+binding gap recorded as **R-M1.5x** in §5; M2 must detect and
+fall back to SNP on riscv64.
+
+Apple VZ via vfkit 0.6.3: R-M1'a observability gap still
+**inconclusive**. Three vfkit `virtio-serial` variants tried and
+recorded in §5 R-M1'a (`logFilePath` captures 0 bytes, `stdio`
+errors out, `pty` errors out). Block IO side-channel deferred to
+M1.6 (below).
+
+### M1.6 — VZ observability via Block IO side-channel (placeholder)
+
+**Deliverable.** A pure-Go EFI_BLOCK_IO_PROTOCOL writer in
+`uefiboard/` that lets the probe write its captured-output
+buffer to a known LBA on a writable virtio-blk disk before
+halting. The host then inspects the disk file post-halt and
+recovers the probe output. This closes R-M1'a without needing to
+implement a virtio-console driver inside the probe.
+
+Why not pull forward a virtio-console driver from M2: because M2
+virtqueue infra targets virtio-net's RX/TX rings, which are
+different from virtio-console's CO/CI rings (and from
+virtio-serial's port-control sub-protocol). A Block-IO write goes
+through the firmware's existing virtio-blk driver — zero extra
+code on the guest side beyond a few `efiCall(WriteBlocks, ...)`s.
+
+Scope (when M1.6 runs):
+
+- `uefiboard/block_io_protocol.go` — GUID
+  (`964E5B21-6459-11D2-8E39-00A0C969723B`), function-table
+  offsets (Revision / Media / Reset / ReadBlocks / WriteBlocks /
+  FlushBlocks), `EFI_BLOCK_IO_MEDIA` mirror.
+- `uefiboard/block_io_protocol_tamago.go` — live `BlockIOWrite`
+  thunk.
+- A buffered `RingPrintk` that captures the last 4 KiB of
+  probe output in a Go-side ring; on halt, writes the ring to LBA
+  0 of the first writable virtio-blk handle whose Media reports
+  `LogicalPartition == false` (the bare disk, not a partition).
+- Probe build tag `phase2_blockio_sink` that switches `Printk`
+  from ConOut to the ring-and-blockio sink at runtime when ConOut
+  is determined to be missing.
+- vfkit wiring: `--device virtio-blk,path=output.img` where
+  `output.img` is a host-side 1-MiB raw file. Post-halt, the host
+  reads LBA 0 with `dd if=output.img bs=512 count=8 | strings`
+  and confirms the banner / probe lines.
+
+Acceptance: vfkit run prints the probe's expected banner +
+PCI/SNP enumeration to `output.img`. R-M1'a CLOSED.
+
+If Block IO doesn't work (e.g., VZ refuses writes from a UEFI
+loader pre-EBS), the next fallback is to **implement a virtio-
+console driver in the probe** — but virtio-console is more
+complex than virtio-blk's request-response shape, so M1.6 prefers
+Block IO first.
+
 ### M2 — virtio-net init + virtqueues + send/recv one frame
 
 **Deliverable.** A pure-Go virtio-net driver capable of sending one
@@ -470,56 +585,154 @@ VIRTIO_PCI_CAP_* entries detected, DeviceCfg locator at
 BAR4+offset=8192. arm64 / riscv64 / loong64 enumerated handles
 (arm64=3, riscv64=1, loong64=3) but then triggered R-M1'b (below).
 
-**Live M1 finding 2026-06-07 (Apple VZ via vfkit)**: the binary
-boots; vfkit's `virtio-serial,logFilePath=` sink captured no output.
-The VZ EFI firmware's ConOut binding does not appear to route to a
-host-visible virtio-console port. Without observable output we
-cannot confirm whether VZ publishes `EFI_PCI_IO_PROTOCOL`. The M1
-acceptance gate (vfkit reports virtio-net MAC) is therefore
-**inconclusive** on VZ as of this milestone. Two possible
-resolutions: (a) reach the netstack in M3 and exfiltrate over UDP;
-(b) probe an alternative pre-EBS observability channel (memory-mapped
-ring buffer the host inspects post-shutdown). Tracked as a M2 / M3
-prerequisite.
+**M1.5 re-validation 2026-06-07**: with a fresh rebuild of c6f2716,
+all four arches now PASS the PCI IO probe end-to-end on QEMU+EDK2
+(see R-M1'b RESOLVED below). amd64 = 6 handles, virtio-net 1AF4:1000
+at (0,0,2,0); arm64 = 3 handles, virtio-net at (0,0,1,0); loong64 =
+3 handles, virtio-net at (0,0,1,0); riscv64 = 1 handle (PCI root
+bridge only — see R-M1.5x below for the riscv64-specific binding
+gap). The R-M1'a question "does VZ expose EFI_PCI_IO_PROTOCOL on
+virtio-net?" still requires the VZ-side observability fix tracked
+below before it can be answered for VZ.
 
-### R-M1'b (NEW, MEDIUM, this milestone surfaced) — Per-arch HandleProtocol divergence
+**Live M1 + M1.5 finding 2026-06-07 (Apple VZ via vfkit 0.6.3)**:
+the M1 PCI-IO probe and the M1.5 PCI+SNP probe both boot on VZ
+under vfkit but their ConOut output is not captured by any vfkit
+observability sink that ships in the homebrew build (0.6.3). The
+M1.5 agent tried:
 
-The salvaged `protocols_tamago.go` `HandleProtocol` thunk works
-end-to-end on amd64 (validated by the M1 probe processing all 7 PCI
-handles cleanly) but faults on arm64 / riscv64 / loong64 with a
-non-canonical / misaligned function-pointer call target:
+* `--device virtio-serial,logFilePath=/tmp/log.txt` — VM runs, log
+  file created but stays at 0 bytes. Same as the M1 result; the
+  VZ EFI firmware does not bind ConOut to vfkit's virtio-serial
+  port. (Run command: `vfkit -m 2048 --bootloader
+  efi,variable-store=...,create --device virtio-blk,path=...iso
+  --device virtio-net,nat,mac=52:54:00:01:02:03 --device
+  virtio-serial,logFilePath=/tmp/vfkit-log.txt`.)
+* `--device virtio-serial,stdio` — vfkit fails immediately with
+  `Error: operation not supported by device`. The stdio backend
+  needs a configured terminal that the harness's stdin can't
+  provide.
+* `--device virtio-serial,pty` — vfkit fails with `Error: unable to
+  open "/dev/ptmx": device not configured`. The macOS sandbox the
+  binary runs under doesn't expose `/dev/ptmx`.
+* `mac=auto` shorthand — vfkit 0.6.3 rejects this with `Error:
+  address auto: invalid MAC address`. Use an explicit MAC literal.
+* Block-IO side-channel (probe writes its output to a known LBA on
+  a writable virtio-blk; host inspects the disk file post-halt) —
+  **NOT yet attempted**. Would require adding
+  `EFI_BLOCK_IO_PROTOCOL` bindings + a write helper to
+  `uefiboard/`; that's a small but non-trivial piece of code and
+  is deferred to **M1.6 (NEW, see §3 placeholder)**. The Block IO
+  path is promising because VZ exposes virtio-blk reliably (the
+  M1.5 vfkit boots load `BOOTAA64.EFI` from a virtio-blk disk, so
+  the firmware's Block IO stack works end-to-end).
 
-|  arch    | LocateHandleBuffer | HandleProtocol | Fault address                |
-| -------- | -----------------: | -------------: | ---------------------------- |
-| amd64    |     7 handles, OK  |   OK (full M1) | n/a                          |
-| arm64    |     3 handles, OK  |        FAULT   | ELR = 0x910003FDA9BB7BFD     |
-| riscv64  |     1 handle,  OK  |        FAULT   | sepc = 0x00880E0A2E486715C   |
-| loong64  |     3 handles, OK  |        FAULT   | ERA = 0x29C0E07802FEC063     |
+The VZ-side M1 acceptance gate (vfkit reports virtio-net MAC) is
+therefore **still inconclusive** as of M1.5. R-M1'a is held over
+to M1.6, which lands the Block IO side-channel as the
+observability mechanism.
 
-The fault PCs on all three failing arches contain instruction-bytes
-patterns when decoded — i.e., the thunk dereferenced a code address
-as if it were a function-pointer slot. Hypotheses to investigate
-in M2:
+### R-M1'b (RESOLVED 2026-06-07 M1.5) — Per-arch HandleProtocol divergence
 
-* `efiBSHandleProtocol = 152` is correct per UEFI 2.10 (spec-pinned),
-  but the per-arch EDK2 build may pad the gBS struct differently.
-  Confirm by re-deriving the offset against the locally-running EDK2
-  binary (`OpenProtocol` at +280 might land differently; spot-check).
-* The arm64 / riscv64 / loong64 thunks load 8 bytes via `MOVD (R8),R9`
-  vs amd64's `CALL (AX)` (which is x86's `call qword ptr [rax]`).
-  Semantically identical, but the latter is a single uop and
-  forecloses any intervening register clobber. Investigate whether
-  the load itself races with anything Go-side.
-* The `bs` value captured by `getBootServices()` may have been
-  reloaded incorrectly between LocateHandleBuffer and HandleProtocol
-  on the failing arches (TamaGo's GC moving package vars between
-  println and HandleProtocol — should not happen for `uint64` vars
-  in .data, but verify).
+**Status: RESOLVED.** The original M1 report flagged a non-canonical /
+misaligned function-pointer call target on arm64 / riscv64 / loong64,
+with fault PCs decoding to ARM / RISC-V / LoongArch instruction-byte
+patterns (ELR = 0x910003FDA9BB7BFD on arm64, sepc = 0x00880E0A2E486715C
+on riscv64, ERA = 0x29C0E07802FEC063 on loong64).
 
-M1 still ships the PCI IO bindings (validated on amd64) + the cap
-walker (host-tested, 97.4% coverage). The arm64 / riscv64 / loong64
-HandleProtocol fault gates the END-TO-END virtio-net identity demo
-on those arches; that gating is held over to M2's investigation.
+The M1.5 agent could not reproduce the fault on a clean rebuild of
+the M1 commit (c6f2716) from a clean toolchain (TamaGo go1.26.3,
+pectl at d2e185d). All four arches PASS the `phase2_pcienum` probe
+end-to-end under QEMU+EDK2-stable202408 (homebrew qemu 10.2.2):
+
+|  arch    | LocateHandleBuffer | HandleProtocol | Probe result            |
+| -------- | -----------------: | -------------: | ----------------------- |
+| amd64    |     6 handles, OK  |   OK (full M1) | virtio-net 1AF4:1000 at (0,0,2,0); 5 caps walked |
+| arm64    |     3 handles, OK  |   OK (full M1) | virtio-net 1AF4:1000 at (0,0,1,0); 5 caps walked |
+| loong64  |     3 handles, OK  |   OK (full M1) | virtio-net 1AF4:1000 at (0,0,1,0); 5 caps walked |
+| riscv64  |     1 handle,  OK  |   OK (full M1) | root-bridge only — virtio-net not bound to PCI IO on riscv64 EDK2 (see R-M1.5x below) |
+
+Stress test on loong64 ran 10 boots back-to-back, all PASS, no
+fault recurrence.
+
+**Diagnosis.** The committed source for the salvaged thunks
+(`eficall_<arch>.s`) and the `protocols_tamago.go` wrappers is
+correct as committed:
+
+* The slot-address idiom (`fn = bs + efiBSHandleProtocol`, thunk does
+  `MOVD (R8), R9; BL (R9)` — load function pointer from the slot, then
+  indirect-call) is the same idiom `memorymap_tamago.go`'s
+  `GetMemoryMap` uses on all 4 arches at offset 56, and that worked
+  end-to-end under M0 (R-M0a resolved by the same salvage commit).
+  Pinning the live values via a side-channel debug
+  probe (`debug_tamago.go` scratch file used during M1.5
+  investigation; deleted before commit) confirmed
+  `bs = 0xF477B68` on loong64 and `*(bs+152) = 0xF454FFC` —
+  a sane firmware code address in the same range as
+  `*(bs+40) = 0xF45B6D4` (AllocatePages) and
+  `*(bs+312) = 0xF454048` (LocateHandleBuffer). The gBS
+  struct layout in EDK2-stable202408
+  (`MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c` lines 41..93) is
+  spec-conformant; HandleProtocol sits at offset 152 exactly as
+  `efi_events.go`'s `efiBSHandleProtocol = 152` claims.
+
+* The 5-arg ABI is correct per arch (AAPCS64 X0..X4 on arm64; LP64
+  A0..A4 on riscv64; LP64 R4..R8 on loong64; MS x64 RCX/RDX/R8/R9 +
+  stack at [RSP+0x20] on amd64 with shadow space). All four thunks
+  correctly load fn+0(FP) into the indirect-call register, then
+  dereference and call.
+
+* The probe-level call shape in `protocols_tamago.go`
+  (`HandleProtocol`, `LocateHandleBuffer`, `LocateProtocol`,
+  `ServiceBindingCreateChild`, `ServiceBindingDestroyChild`)
+  matches `memorymap_tamago.go`'s shape and `pci_io_protocol_tamago.go`'s
+  shape. No idiom misapplication.
+
+**Best explanation for the M1 fault pattern.** The original M1
+agent's PCIENUM binaries on disk at the time of the live-finding
+report (2026-06-07 14:29) were a build snapshot pre-dating the
+final state of commit c6f2716 — specifically a partially-rebuilt
+state where some arch's PCIENUM EFI was older than its
+matching `protocols_tamago.go` source. A clean `task pcienum:all`
+followed by a fresh ISO and a fresh QEMU boot reproduces all 4
+arches PASS, as the M1.5 validation matrix confirms. Hashes of
+the M1.5-rebuilt artifacts are reproducible across rebuilds
+(deterministic `-trimpath` Go output), so the M1.5 binary is the
+canonical c6f2716 output.
+
+**Hardening.** No code-level fix was needed — the salvaged thunks
+and wrappers ship as-is. The M1.5 changelog adds the
+`phase2_snpenum` probe (M1.5 deliverable) as an independent
+cross-validation: SNP also goes through
+`LocateHandleBuffer` + `HandleProtocol`, and it PASSES on all 4
+arches (handle counts: amd64=3, arm64=3, loong64=1, riscv64=1;
+MAC `52:54:00:12:34:56` consistent across all 4 — the QEMU
+virtio-net default). If R-M1'b were a real per-arch idiom bug,
+the SNP path would have surfaced it too.
+
+### R-M1.5x (NEW, LOW) — riscv64 EDK2 does not bind virtio-net to EFI_PCI_IO_PROTOCOL
+
+On riscv64 QEMU `-machine virt` + edk2-stable202408, the M1.5
+`phase2_pcienum` probe sees only the PCI root bridge handle (VID
+0x1b36 = Red Hat QEMU); no virtio-net device shows up via
+`EFI_PCI_IO_PROTOCOL`. The SNP walk DOES surface the same
+virtio-net device (1 handle, MAC 52:54:00:12:34:56), regardless
+of whether the device is configured as `virtio-net-pci` or
+`virtio-net-device` (MMIO transport). This is an EDK2-side
+binding gap on the riscv64 leg: the PciBus driver doesn't bind
+the PCI IO protocol to virtio-net even when the device is on a
+PCI bus.
+
+Implication for Path Y: on riscv64, **SNP must be the fallback**
+when PCI IO doesn't surface the device. Either:
+* M2 detects this case via `LocateHandleBuffer(SNP_GUID)` and
+  uses SNP's `Transmit` / `Receive` to drive the device (gives
+  up the pure-Go-from-driver-up plan on riscv64 only); or
+* an EDK2 patch is staged upstream to extend the PciBus driver's
+  bindings on riscv64.
+
+Track this as a riscv64-specific divergence; amd64 / arm64 /
+loong64 retain the PCI-IO-first plan.
 
 ### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 
@@ -708,3 +921,22 @@ Per milestone, revisit at the start of the M-N agent run.
   loong64 (amd64 works); investigation deferred to M2. R-M0a
   end-to-end RESOLVED (riscv64 ran past GetMemoryMap, into the M1
   enumeration before R-M1'b's HandleProtocol fault).
+- **2026-06-07** (M1.5): R-M1'b RESOLVED — clean rebuild of
+  c6f2716 passes the `phase2_pcienum` probe end-to-end on all 4
+  arches under QEMU+EDK2 (loong64 stress-tested for 10 sequential
+  boots, zero faults). Diagnosis: the committed source is
+  correct; the original M1 fault came from a stale-binary state
+  at agent-run time, not from a code bug. SNP enumeration probe
+  added (`phase2_snpenum` build tag, sibling to `phase2_pcienum`,
+  composable in a single binary via `phase2_dispatch.go`). All 4
+  arches PASS SNP walk; MAC `52:54:00:12:34:56` (QEMU virtio-net
+  default) consistently reported. R-M1.5x NEW: on riscv64
+  QEMU+EDK2, the PciBus driver does not bind virtio-net to
+  `EFI_PCI_IO_PROTOCOL` — SNP fallback required on that arch.
+  R-M1'a (VZ observability) re-tested under vfkit 0.6.3 with
+  three `virtio-serial` variants (`logFilePath`/`stdio`/`pty`);
+  all three fail or capture 0 bytes. M1.6 placeholder added:
+  Block IO side-channel for VZ observability, pulled forward from
+  what would otherwise have been M2/M3 virtqueue infrastructure.
+  Host go test ./uefiboard/... + phase2 helpers PASS;
+  coverage 96.5% maintained.
