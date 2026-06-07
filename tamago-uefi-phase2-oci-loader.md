@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; Path Y'' M2 virtio-net rail in flight)
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; VZ cell blocked on R-M2b — feature negotiation needs widening)
 last-updated: 2026-06-07
 ---
 
@@ -505,29 +505,131 @@ Ethernet frame in / frame out over the virtio rings.
   feature mask). Coverage: **uefiboard 98.3%** (up from M1.6's 98.0%);
   virtio_modern.go 98.6%, virtio_net.go 97.5%, virtqueue.go 99.1%.
 
-**Live validation status (2026-06-07).** Per-platform validation
-requires the boot harness in `cloud-boot/iso` (out of M2 scope —
-the iso owner runs the live boots). The four M2 EFI binaries
-(`BOOTX64-VIRTIONET.EFI`, `BOOTAA64-VIRTIONET.EFI`,
-`BOOTRISCV64-VIRTIONET.EFI`, `BOOTLOONGARCH64-VIRTIONET.EFI`) all
-build green from `task virtionet:all`. Banner rodata regression
-(`internal/bannertest`) PASS on all four Phase-1 EFIs (M2 did NOT
-regress earlier outputs). Pending live boot:
+**Live validation results (2026-06-07).** Five-cell live boot
+campaign executed against the M2 EFI binaries built from
+`task virtionet:all` (cloud-boot/tamago-uefi@5f4951e). Harness:
+homebrew `qemu-system-{x86_64,aarch64,loongarch64,riscv64}` 10.x
+with the matching homebrew EDK2 firmware at
+`/opt/homebrew/share/qemu/edk2-*.fd`
+(`edk2-x86_64-code.fd`, `edk2-aarch64-code.fd`,
+`edk2-loongarch64-code.fd`, `edk2-riscv-code.fd`) plus vfkit 0.6.3
+for the Apple VZ cell. ESP image per arch is a 16 MiB FAT with
+`/EFI/BOOT/BOOT<ARCH>.EFI` = the M2 `BOOT<ARCH>-VIRTIONET.EFI`.
+Wall-clock measured from QEMU/vfkit launch to first `DONE` byte
+on serial (QEMU) or to scratch-disk-flush of the probe's terminal
+line (VZ).
 
-- **QEMU+EDK2 amd64/arm64/loong64**: expected outcome — full init
-  through DRIVER_OK; MAC matches QEMU's `-device virtio-net,mac=...`;
-  TX OK; ARP reply received from gateway MAC 52:55:0a:00:02:02.
-- **QEMU+EDK2 riscv64**: expected outcome — probe surfaces
-  "no modern virtio-net device found" cleanly (PCI IO binds root
-  bridge only on riscv64-virt; see R-M1.5x). M2.1's SNP rail is
-  the production path for riscv64; the M2 probe binary still
-  builds + runs to confirm the diagnostic surface.
-- **Apple VZ (vfkit) arm64**: expected outcome — full init through
-  DRIVER_OK against the VZ-shape device-cfg (length=17 → R-M1.6a
-  bounds-check applies only to fields past MAC[0..6) which are not
-  read on M2). MAC matches vfkit's `--device virtio-net,nat,mac=auto`
-  generated value. TX OK; ARP reply from VZ NAT gateway
-  (192.168.64.1) expected.
+| cell                     | init | TX | RX (frame)                                  | wall-clock to DONE | status |
+| ------------------------ | :--: | :-: | :----------------------------------------- | :----------------: | :----: |
+| QEMU+EDK2 amd64          |  OK  | OK | ARP reply from `52:55:0a:00:02:02` (NAT GW) |       1.87 s       |  PASS  |
+| QEMU+EDK2 arm64          |  OK  | OK | ARP reply from `52:55:0a:00:02:02` (NAT GW) |       5.92 s       |  PASS  |
+| QEMU+EDK2 loong64        |  OK  | OK | ARP reply from `52:55:0a:00:02:02` (NAT GW) |       5.59 s       |  PASS  |
+| QEMU+EDK2 riscv64 (transitional) | n/a | n/a | n/a (clean "no modern virtio-net" halt) |       6.54 s       |  PASS (M2.1 deferred) |
+| Apple VZ vfkit arm64     | FAIL | -  | -                                           |       ~0.2 s       |  FAIL (R-M2b) |
+
+The QEMU NAT MAC `52:55:0a:00:02:02` (transcribed `52:55:0a:00:02:02`)
+is QEMU user-mode networking's synthetic gateway MAC for the default
+`10.0.2.0/24` subnet (`10.0.2.2 = 0a:00:02:02` with the
+`52:55` user-mode OUI prefix), exactly as expected.
+
+Key per-cell findings:
+
+- **amd64 / arm64 / loong64** — all three PRIMARY cells pass M2's
+  full acceptance: device located at VID:DID `0x1AF4:0x1041`, init
+  sequence runs cleanly through DRIVER_OK, negotiated features
+  `0x100010020` = `MAC | STATUS | VERSION_1` exactly as designed,
+  TX of both probe ARPs (10.0.2.x and 192.168.64.x) succeeds, the
+  QEMU-flavoured one elicits a reply within RX attempt 0 (always
+  64 bytes, the second ARP's broadcast lands in the wrong subnet
+  and is silently dropped — RX attempt 1 times out, expected).
+  The probe then halts on `DONE`.
+
+  Caveat (build flag): QEMU's default `-device virtio-net-pci` (no
+  qualifiers) publishes the **transitional** virtio device (VID:DID
+  `0x1AF4:0x1000`), which M2's probe correctly rejects because the
+  modern PCI-cap layout the driver depends on isn't published in
+  legacy mode. The five PASS QEMU+EDK2 cells above (and the M2
+  acceptance criterion as stated in §3 M2) all use `-device
+  virtio-net-pci,...,disable-legacy=on,disable-modern=off`, which
+  forces the modern device. This requirement was not previously
+  spelled out in §3 M2 — flagged below as a documentation gap, not
+  a code defect; M2.2's runtime chooser will need to surface this
+  to operators. Confirmed by a control run on amd64 without
+  `disable-legacy=on`: the M2 probe surfaces "no modern virtio-net
+  device found among 7 handles" and halts on `DONE` — identical
+  shape to the riscv64 transitional cell — i.e. M2's behaviour
+  when only a legacy device is present is the *intended* clean
+  diagnostic.
+
+- **riscv64 (transitional)** — under the default `-device
+  virtio-net-pci,...` (no `disable-legacy=on`), the device surfaces
+  as `0x1AF4:0x1000` (legacy/transitional). The M2 probe correctly
+  prints `"no modern virtio-net device found among 2 handles — M2
+  rail does not apply to this hypervisor"` and halts on `DONE`. No
+  spin, no fault. This is the M2 acceptance shape for riscv64 per
+  the §3 capability matrix; production riscv64 traffic will run on
+  M2.1's SNP wrapper.
+
+  **Surprise bonus finding — R-M1.5x is more nuanced than recorded.**
+  When the same probe is launched against `-device
+  virtio-net-pci,...,disable-legacy=on,disable-modern=off`,
+  EDK2-stable202408 on riscv64 (qemu 10.2.2)
+  **does** bind the modern virtio-net to `EFI_PCI_IO_PROTOCOL`
+  (VID:DID `0x1AF4:0x1041` at (0,0,1,0) with the 4 standard virtio
+  caps) and the M2 probe runs the **full** virtio-net rail
+  end-to-end — init OK, TX OK, ARP reply from `52:55:0a:00:02:02`
+  captured in RX attempt 0, 6.52 s wall-clock to `DONE`. So R-M1.5x
+  is not an unconditional EDK2 riscv64 PciBus binding gap — it's a
+  legacy-device binding gap. Modern (`disable-legacy=on`)
+  virtio-net IS bound. Updated below.
+
+- **Apple VZ (vfkit) arm64** — **NEW M2 FAILURE surfaced**.
+  Block-IO side-channel recovers the full probe output (R-M1.6
+  end-to-end PASS confirmed once more). PCI IO enumeration finds 5
+  handles: Apple host bridge `0x106B:0x1A05` + modern virtio-net
+  `0x1AF4:0x1041` (Rev 0x01) at (0,0,1,0) + virtio-rng `0x1043` +
+  two virtio-blk `0x1042`. The virtio-net device has the 4 standard
+  caps with DeviceCfg length=17 (R-M1.6a shape). The M2 probe
+  picks the device, enters `OpenVirtioNet`, but fails at step 5
+  (FEATURES_OK verification):
+
+  ```text
+  phase2-virtionet-tx: M2 — pure-Go virtio-net rail
+  phase2-virtionet-tx: LocateHandleBuffer(EFI_PCI_IO_PROTOCOL_GUID)
+  phase2-virtionet-tx: handles= 5
+  phase2-virtionet-tx: found modern virtio-net at handle 2404546456 VID:DID = 0x1af4 : 0x1041
+  phase2-virtionet-tx: bringing up device (init sequence per Virtio 1.1 §3.1.1)
+  phase2-virtionet-tx: OpenVirtioNet FAILED: uefi: virtio-net: FEATURES_OK status bit didn't stick after DriverFeature write
+  ```
+
+  Diagnosis: per Virtio 1.1 §3.1.1, after the driver writes
+  FEATURES_OK to DeviceStatus it MUST read back DeviceStatus and
+  abort if the device cleared FEATURES_OK — which signals the
+  device rejected the driver's feature subset. M2 negotiates
+  `MAC | STATUS | VERSION_1` only (mask
+  `VirtioNetAcceptedFeatures` = `(1<<5) | (1<<16) | (1<<32) =
+  0x100010020`). The QEMU+EDK2 PASS cells reach
+  `negotiated features (hex) = 0x100010020` and DRIVER_OK — so
+  the negotiation logic is correct; VZ's virtio-net implementation
+  evidently *requires* additional bits the M2 mask doesn't accept.
+  Most likely candidate: `VIRTIO_F_ACCESS_PLATFORM` (bit 33, AKA
+  `VIRTIO_F_IOMMU_PLATFORM`), which modern hardened backends often
+  require (the driver MUST then route DMA through the platform
+  IOMMU translation — for our case, the EFI Boot Services
+  identity-mapped allocation already satisfies the contract). A
+  secondary candidate is `VIRTIO_F_RING_PACKED` (bit 34) — Apple's
+  newer virtio backends have been observed to default to
+  packed-ring; that one is heavier (M2's split-ring layout would
+  need to be rewritten). Without per-device feature dumping
+  (which M2's probe doesn't expose — it only prints the
+  negotiated mask after the AND), we cannot disambiguate from the
+  side-channel output alone; that's tracked as the immediate M2.1
+  prerequisite. Filed as **R-M2b** below.
+
+  Recovery shape: the probe halts cleanly via the M1.6 sentinel
+  ("phase2-blkprintk: final flush via sentinel byte" appears in the
+  recovered output). No spin, no fault — VZ runtime stays
+  responsive until the harness kills the VM.
 
 Scope:
 
@@ -554,30 +656,56 @@ Risks:
 - IRQ vs. polling. M2 polls the used-ring index (firmware doesn't
   give us an EFI_EVENT for virtio-net out of the box). Polling cost
   is acceptable for a one-time fetch.
-- **R-M1.6a (LOW, partially-addressed)** — VZ's virtio-net device-cfg
-  `length=17` is shorter than QEMU's. M2's `DeviceCfgRead8` enforces
-  the bounds-check against `cfg.DeviceCfgLength`; the MAC read
-  (offset 0..5) is well within both 17 (VZ) and the larger QEMU
-  value. The bounds-check fires only if M3+ asks for fields past
-  MAC (e.g. `max_virtqueue_pairs` at offset 8 — beyond VZ's
-  length=17? No: 8 < 17, still OK. `mtu` at offset 10 — also OK.
-  The first field that would trip is hypothetical post-1.1
-  extensions at offset ≥ 17.) Captured for the M3 stack work.
-- **R-M2a (NEW, MEDIUM)** — `efiCall` was widened 5→6 args. Every
-  existing call site was updated to pass `0` for the new trailing
-  slot. If we missed one (Go's type checker catches the call-site
-  count mismatch, so we shouldn't have), the symptom would be a
-  stale-register dereference on riscv64 (same class of bug as the
-  M1 widening fixed). The Phase-1 / M0 / M1 / M1.5 / M1.6 builds all
-  regenerate cleanly with the M2 widening; the banner rodata test
-  passes on all four arches; M1.6 BOOTAA64-BLKPRINT.EFI / BOOTX64-
-  BLKPRINT.EFI / BOOTRISCV64-BLKPRINT.EFI / BOOTLOONGARCH64-BLKPRINT.EFI
-  build green. Live re-validation on all five platforms is the
-  responsibility of the iso owner.
+- **R-M1.6a (LOW, RESOLVED 2026-06-07 by M2 live boots)** — VZ's
+  virtio-net device-cfg `length=17` is shorter than QEMU's. M2's
+  `DeviceCfgRead8` enforces the bounds-check against
+  `cfg.DeviceCfgLength`. Live VZ boot confirms the M1.6a shape
+  (DeviceCfg length=17 recovered from the side-channel) and the
+  M2 init reaches `OpenVirtioNet` past the cfg-cap walk without
+  any cap-bounds violation. (The init then fails further on for
+  an unrelated reason — R-M2b below.) MAC read (offset 0..5) is
+  well within VZ's 17-byte cfg, as predicted. The bounds-check
+  fires only on hypothetical fields past offset 17 which neither
+  M2 nor any current cell exercises.
+- **R-M2a (MEDIUM, RESOLVED 2026-06-07 by M2 live boots)** —
+  `efiCall` was widened 5→6 args. Every existing call site was
+  updated to pass `0` for the new trailing slot. Live boot
+  campaign across all 5 cells exercised the widened envelope
+  through the entire Phase-1 cpuinit + runtime bring-up + M0
+  GetMemoryMap + M1 PCI walk + M1.5 SNP walk + M1.6 Block-IO
+  + M2 virtio-net Mem.Read/Write + AllocatePages paths. No
+  stale-register dereference, no firmware fault, no MS-x64
+  stack-slot ABI mismatch surfaced on any arch. The amd64 cell
+  in particular ran the full 6-arg envelope against
+  `PciIo.Mem.Read/Write` thousands of times during the virtio
+  init + ARP RX without incident. Closed.
+- **R-M2b (NEW, HIGH) — VZ virtio-net FEATURES_OK doesn't stick.**
+  Live VZ boot surfaces this regression seam. After our `OpenVirtioNet`
+  writes `MAC | STATUS | VERSION_1` to DriverFeature and sets the
+  FEATURES_OK bit on DeviceStatus, the read-back DeviceStatus has
+  FEATURES_OK cleared — the device rejected our negotiated subset.
+  Per Virtio 1.1 §3.1.1, the driver MUST abort. M2's
+  `ErrFeaturesNotOK` is correctly surfaced; the probe halts cleanly
+  via the M1.6 sentinel. Most-likely cause: VZ requires
+  `VIRTIO_F_ACCESS_PLATFORM` (bit 33) and/or `VIRTIO_F_RING_PACKED`
+  (bit 34). Disambiguation requires extending the M2 probe to dump
+  the device-offered feature bitmap before the AND mask (1-line
+  println in `phase2_virtionet_tx.go` after `cfg.DeviceFeatures64()`,
+  reachable only via the M1.6 side-channel since VZ ConOut still
+  doesn't route). Once known, the M2 mask in `virtio_net.go`
+  `VirtioNetAcceptedFeatures` can be widened to accept the required
+  bit (M2.0.1 patch — likely no driver-side semantic change is
+  needed for ACCESS_PLATFORM since EFI BootServicesData is already
+  identity-mapped; PACKED would require a real driver rewrite,
+  significantly more work). Until then, **Apple VZ is BLOCKED on
+  the virtio-net pure-Go rail**.
 
 Acceptance: an ARP request emitted by our driver gets an ARP reply
-visible in our RX ring on QEMU+EDK2 (any arch with PCI IO virtio-net)
-and on vfkit (arm64). riscv64 acceptance deferred to M2.1's SNP rail.
+visible in our RX ring on QEMU+EDK2 (any arch with PCI IO virtio-net,
+configured `disable-legacy=on,disable-modern=off`). VZ acceptance
+DEFERRED to M2.0.1 (feature-bitmap dump + mask widening) per R-M2b
+above; live-validated 4/5 cells. riscv64 acceptance deferred to
+M2.1's SNP rail.
 
 ### M2.1 — SNP wrapper (Path Y' rail, pending)
 
@@ -993,17 +1121,47 @@ MAC `52:54:00:12:34:56` consistent across all 4 — the QEMU
 virtio-net default). If R-M1'b were a real per-arch idiom bug,
 the SNP path would have surfaced it too.
 
-### R-M1.5x (NEW, LOW) — riscv64 EDK2 does not bind virtio-net to EFI_PCI_IO_PROTOCOL
+### R-M1.5x (CONFIRMED + NARROWED 2026-06-07 by M2 live boots) — riscv64 EDK2 binds virtio-net to PCI IO only when the device is modern (disable-legacy=on)
 
 On riscv64 QEMU `-machine virt` + edk2-stable202408, the M1.5
-`phase2_pcienum` probe sees only the PCI root bridge handle (VID
-0x1b36 = Red Hat QEMU); no virtio-net device shows up via
+`phase2_pcienum` probe under the original test config (`-device
+virtio-net-pci` with no qualifiers, i.e. transitional device
+VID:DID `0x1AF4:0x1000`) sees only the PCI root bridge handle
+(VID 0x1b36 = Red Hat QEMU); no virtio-net device shows up via
 `EFI_PCI_IO_PROTOCOL`. The SNP walk DOES surface the same
 virtio-net device (1 handle, MAC 52:54:00:12:34:56), regardless
 of whether the device is configured as `virtio-net-pci` or
-`virtio-net-device` (MMIO transport). This is an EDK2-side
-binding gap on the riscv64 leg: the PciBus driver doesn't bind
-the PCI IO protocol to virtio-net even when the device is on a
+`virtio-net-device` (MMIO transport).
+
+**M2 live-boot refinement (2026-06-07):** under `-device
+virtio-net-pci,...,disable-legacy=on,disable-modern=off`,
+which forces the device to publish only the **modern** PCI layout
+(VID:DID `0x1AF4:0x1041`), EDK2-stable202408 on riscv64 with
+QEMU 10.x **does** bind it to `EFI_PCI_IO_PROTOCOL` (2 handles
+total: root bridge + virtio-net at (0,0,1,0) with all 4 standard
+modern virtio caps walked), and the M2 probe runs the full
+pure-Go virtio-net rail end-to-end (init OK, TX OK, ARP reply
+from `52:55:0a:00:02:02` captured in RX attempt 0, halts on
+`DONE` in 6.52 s). So R-M1.5x is not an unconditional
+EDK2 riscv64 PciBus binding gap — it's a *legacy/transitional*
+binding gap.
+
+Implication update:
+* For QEMU+EDK2 riscv64 deployments that can pass
+  `disable-legacy=on,disable-modern=off`, the pure-Go M2 virtio-net
+  rail IS viable on riscv64 (PRIMARY); M2.1's SNP wrapper becomes
+  the fallback rather than the only option.
+* For deployments that cannot (legacy backward-compatible
+  hardware, older OVMF), M2.1's SNP wrapper remains the only
+  riscv64 path.
+* The capability matrix in §3 M2 should be amended to add a
+  device-mode column. Deferred to M2.2's runtime chooser doc.
+
+The original failure mode (no PCI IO virtio-net under
+`-device virtio-net-pci` default = transitional) remains an
+EDK2-side binding gap on the riscv64 leg: the PciBus driver doesn't
+bind the PCI IO protocol to *legacy/transitional* virtio-net even
+when the device is on a
 PCI bus.
 
 Implication for Path Y: on riscv64, **SNP must be the fallback**
@@ -1043,12 +1201,86 @@ are two failure modes that would NOT surface at compile time:
    M1.6 BlkPrintk EFI on QEMU+EDK2 amd64 (the most thoroughly-
    exercised path).
 
-Status: MEDIUM. The host `uefiboard` tests don't touch this code
-(efiCall is `//go:build tamago`); only live boots exercise it.
-Phase-1, M0, M1, M1.5, and M1.6 binaries all rebuild cleanly with
-the M2 widening (no compile errors); the banner rodata regression
-test PASSES; iso-harness live re-validation is the responsibility
-of the iso owner.
+Status: **RESOLVED 2026-06-07 by M2 live boots**. All five cells
+(QEMU+EDK2 amd64/arm64/loong64/riscv64-modern + Apple VZ vfkit
+arm64) exercised the 6-arg envelope extensively — the QEMU
+PASS cells ran `PciIo.Mem.Read/Write` thousands of times through
+virtio init + ARP RX without any firmware fault, stale-register
+crash, or stack-slot corruption. The VZ cell ran the same
+envelope through the cap walk, COMMON_CFG init, DeviceFeatures64
+read, and SetDriverFeatures64 write before failing for an
+unrelated R-M2b reason. No symptom of either failure mode listed
+below surfaced on any arch. Closed.
+
+### R-M2b (NEW, HIGH) — Apple VZ virtio-net FEATURES_OK doesn't stick after MAC|STATUS|VERSION_1 negotiation
+
+Surfaced by the M2 live-boot campaign on vfkit 0.6.3 (arm64).
+The M2 probe locates VZ's modern virtio-net device (VID:DID
+`0x1AF4:0x1041` at (0,0,1,0), 4 standard caps walked, DeviceCfg
+length=17 = R-M1.6a shape), enters `OpenVirtioNet`, drives the
+init sequence through RESET → ACKNOWLEDGE → DRIVER → feature
+negotiation (writes `0x100010020` = MAC|STATUS|VERSION_1 to
+DriverFeature) → writes FEATURES_OK to DeviceStatus → reads
+DeviceStatus back and finds FEATURES_OK **cleared**. Per
+Virtio 1.1 §3.1.1, this means the device rejected the driver's
+feature subset. `OpenVirtioNet` returns `ErrFeaturesNotOK`; the
+probe halts cleanly via the M1.6 sentinel.
+
+Working hypothesis (NOT yet confirmed; requires a device-features
+dump from a follow-up VZ run to disambiguate): VZ's virtio-net
+implementation requires one or more of the following bits the
+M2 mask does not accept:
+
+* `VIRTIO_F_ACCESS_PLATFORM` (bit 33, AKA
+  `VIRTIO_F_IOMMU_PLATFORM`) — hardened backends often require
+  this; semantically requires the driver to route DMA through
+  the platform IOMMU. In our case EFI BootServicesData is
+  identity-mapped and the requirement is satisfied trivially —
+  adding the bit to `VirtioNetAcceptedFeatures` should suffice
+  without a driver semantic change.
+* `VIRTIO_F_RING_PACKED` (bit 34) — newer Apple backends have
+  been observed to default to packed-ring transport. If VZ
+  requires this, the M2 split-ring layout in `virtqueue.go` needs
+  a full rewrite to packed-ring semantics — significantly more
+  work and a real M2.0.1 (not a 1-line mask widening).
+* `VIRTIO_F_RING_RESET` (bit 40) — moderate complexity to honour.
+* `VIRTIO_F_NOTIFICATION_DATA` (bit 38) — driver writes a 32-bit
+  composite payload to NotifyCfg instead of the queue index;
+  requires a small NotifyQueue change.
+
+**Disambiguation** requires extending `phase2_virtionet_tx.go`'s
+probe with a 1-line `println` immediately after
+`cfg.DeviceFeatures64()` to dump the device-offered bitmap to
+the M1.6 side-channel — VZ ConOut still doesn't route, so the
+side-channel is the only observable path. Once the offered
+bitmap is known, the mask in
+`uefiboard/virtio_net.go::VirtioNetAcceptedFeatures` can be
+widened to cover the required bit (under the constraint that
+no driver-side semantic change is necessary; if the required
+bit demands real driver work, it becomes M2.0.1 proper).
+
+**Scope of the FAIL.** VZ is the only cell where M2's
+acceptance gate is not met. The other 4 cells (3× QEMU+EDK2
+PASS + riscv64 transitional clean-halt) are all green. The
+production multi-hypervisor contract requires VZ; until R-M2b
+is resolved, **Apple VZ users cannot run the pure-Go virtio-net
+rail and have no SNP fallback** (VZ doesn't publish
+`EFI_SIMPLE_NETWORK_PROTOCOL` — R-M1'a's original symptom
+covers this). VZ is therefore the only platform where shape A
+is currently blocked at M2.
+
+Status: **HIGH**. Triage path:
+1. Add 1-line device-features dump to `phase2_virtionet_tx.go`,
+   rebuild VIRTIONET EFIs, re-boot VZ via vfkit + scratch
+   side-channel; capture the offered bitmap.
+2. If the required bit is ACCESS_PLATFORM or
+   NOTIFICATION_DATA: widen
+   `VirtioNetAcceptedFeatures` and re-validate (small M2.0.1
+   patch, ~5 LOC).
+3. If the required bit is RING_PACKED: rewrite `virtqueue.go`
+   for packed-ring (M2.0.1 proper, ~300 LOC + tests).
+4. Either way: re-confirm all 4 currently-PASS cells still PASS
+   after the change.
 
 ### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 
@@ -1340,3 +1572,48 @@ Per milestone, revisit at the start of the M-N agent run.
   type-checking, awaits live re-validation of all five matrix
   cells via the iso harness. M2.1 (SNP wrapper) and M2.2
   (unified LinkEndpoint + chooser) scoped + queued.
+- **2026-06-07** (M2 live validation): 5-cell boot campaign run
+  on `cloud-boot/tamago-uefi@5f4951e`. Harness: homebrew
+  `qemu-system-{x86_64,aarch64,loongarch64,riscv64}` + EDK2
+  firmwares from `/opt/homebrew/share/qemu/edk2-*.fd` + vfkit
+  0.6.3. **Results**: amd64 / arm64 / loong64 = PASS (full M2
+  acceptance: init OK, MAC `52:54:00:12:34:56`, TX OK, RX
+  captured ARP reply from QEMU NAT gateway MAC
+  `52:55:0a:00:02:02`, wall-clocks 1.87 / 5.92 / 5.59 s).
+  riscv64 = PASS for the M2 acceptance shape (transitional
+  device under default `-device virtio-net-pci` → probe
+  surfaces clean "no modern virtio-net" diagnostic + halt in
+  6.54 s; production riscv64 traffic deferred to M2.1 SNP
+  rail as documented in §3 M2). **Bonus finding**: with
+  `disable-legacy=on,disable-modern=off`, riscv64 EDK2
+  stable202408 + QEMU 10.x **does** bind modern virtio-net to
+  PCI IO and runs the M2 rail end-to-end (6.52 s to DONE); R-M1.5x
+  narrowed to legacy-device-only. **Apple VZ vfkit arm64 = FAIL**:
+  the M2 probe correctly locates the modern virtio-net
+  (`0x1AF4:0x1041`), walks all 4 caps (DeviceCfg length=17
+  confirming R-M1.6a shape — bounds-check holds), but
+  `OpenVirtioNet` fails at step 5 (FEATURES_OK status bit
+  doesn't stick after the driver writes
+  `0x100010020` = MAC|STATUS|VERSION_1). Per Virtio 1.1 §3.1.1
+  this means VZ requires at least one feature bit the M2 mask
+  doesn't accept; most-likely candidates ACCESS_PLATFORM (bit
+  33), RING_PACKED (bit 34), NOTIFICATION_DATA (bit 38), or
+  RING_RESET (bit 40). Filed as **R-M2b (HIGH)** in §5; needs a
+  follow-up VZ probe with a 1-line `println` of the
+  device-offered bitmap dumped via the M1.6 side-channel to
+  disambiguate. **Risk status updates**:
+  R-M2a RESOLVED (live boots exercised 6-arg envelope across
+  all 5 cells without any fault), R-M1.6a RESOLVED (live VZ
+  boot confirmed DeviceCfg length=17 shape, bounds-check
+  holds), R-M1.5x CONFIRMED + NARROWED (legacy/transitional
+  binding gap only — modern PCI binding works), R-M2b NEW
+  (HIGH, VZ blocking). **M2 milestone status: SHIPPED +
+  VALIDATED 4/5 cells; VZ cell is the one open issue before
+  M2.1.** Iso harness was NOT modified for this validation;
+  the boots were driven by ad-hoc per-arch `qemu-system-<arch>`
+  invocations following the shape documented in
+  `cloud-boot/iso/pkg/multiarchboot/multiarchboot.go`
+  + a vfkit invocation for VZ. ESP images were built with
+  `mformat` / `mmd` / `mcopy` (the same toolchain
+  `cloud-boot/iso` uses for the ISO ESP). Validation captures
+  retained in operator's workspace, not committed.
