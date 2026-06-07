@@ -8,7 +8,7 @@ cloud-boot is a [GitHub organisation](https://github.com/cloud-boot)
 that holds four core repositories plus the sibling orgs they consume.
 This page is the "what does each thing actually do" reference.
 
-## The four core repos
+## The core repos
 
 ### `init/` — PID 1 in the initramfs
 
@@ -63,7 +63,7 @@ Helper scripts:
 - `uki/scripts/reset-cloud-boot.sh` — in-band NVRAM cleaner to
   return to the menu after a staged target was set.
 
-### `loader/` — Pure-UEFI bootloader
+### `loader/` — Pure-UEFI bootloader (TinyGo)
 
 [github.com/cloud-boot/loader](https://github.com/cloud-boot/loader)
 
@@ -81,7 +81,38 @@ abandoned for Apple VZ after the VZ firmware was confirmed to ship
 no `HTTP` / `TCP4` / `DHCP4` / `DNS4` protocols and virtio-net
 rejects `FEATURES_OK` from any UEFI-context client. The loader
 still ships the six-distro cascade on QEMU/OVMF and EDK2 hardware
-where its protocol assumptions hold.
+where its protocol assumptions hold. The networked phases are
+revisited by [`tamago-uefi/`](#tamago-uefi--pure-go-unikernel-bootloader-tamago)
+below, which brings its own pure-Go virtio-net + netstack so it can
+ignore the firmware's missing protocols.
+
+### `tamago-uefi/` — Pure-Go unikernel bootloader (TamaGo)
+
+[github.com/cloud-boot/tamago-uefi](https://github.com/cloud-boot/tamago-uefi)
+
+The Phase 2 successor to `loader/`'s networked phases. Same shape
+(PE32+/EFI app, lives in Boot Services until `StartImage`) but
+written in **standard Go on the TamaGo bare-metal runtime**, not
+TinyGo. Multi-arch (amd64 / arm64 / loong64 / riscv64) end-to-end,
+with the full Go runtime (GC, scheduler, goroutines, `crypto/tls`,
+`net/http`, `sync`) available pre-EBS. Implements `Path D` — see
+the [TamaGo UEFI architecture page](tamago-uefi.md) for the
+narrative and decisions, and the
+[Phase 2 design doc](https://github.com/cloud-boot/docs/blob/main/tamago-uefi-phase2-oci-loader.md)
+for milestone status + risk register.
+
+### `iso/` — Multi-arch hybrid ISO assembler
+
+[github.com/cloud-boot/iso](https://github.com/cloud-boot/iso)
+
+Standalone CLI + library that packs one or more PE32+/EFI binaries
+(`BOOTX64.EFI` / `BOOTAA64.EFI` / `BOOTLOONGARCH64.EFI` /
+`BOOTRISCV64.EFI`) into a single hybrid iso9660 + El Torito + GPT
+image with a FAT ESP. Generic — works for tamago-uefi unikernels,
+classic UKIs, BSD `loader.efi`. The QEMU + EDK2 boot harness
+(`pkg/multiarchboot`) drives `qemu-system-<arch>` against each
+arch's matching OVMF and asserts the runtime banner; used by both
+`tamago-uefi`'s e2e tests and `uki`'s future ISO-step.
 
 ### `kernel/` — Reproducible bootstrap kernel
 
