@@ -238,6 +238,14 @@ validation.
     `BaseRiscVMmuLib.c`, found during the riscv64 firmware audit.
     **Submitted upstream as
     [tianocore/edk2#12650](https://github.com/tianocore/edk2/pull/12650).**
-  - [`docs/edk2-riscv64-getmemorymap-null-deref.patch`](https://github.com/cloud-boot/docs/blob/main/edk2-riscv64-getmemorymap-null-deref.patch)
-    — NULL `DescriptorVersion` deref fix in EDK2's `CoreGetMemoryMap`
-    on riscv64; awaiting upstream submission.
+  - There is **no** second EDK2 patch. An earlier note hypothesised a
+    NULL-`DescriptorVersion` deref in `CoreGetMemoryMap` on riscv64
+    (R-M0a). On verification, both `master` and `edk2-stable202408`
+    already guard all three OUT writes (`DescriptorVersion`,
+    `DescriptorSize`, `MapKey`) with `if (X != NULL)`. The riscv64
+    fault was **our** client-side bug — the 4-arg `efiCall` thunk left
+    a garbage non-NULL value in the `DescriptorVersion` register slot,
+    which EDK2 faithfully wrote to. Fixed on our side by widening
+    `efiCall` to 5 args and passing a real `*uint32` (commit
+    [cfa6dca](https://github.com/cloud-boot/tamago-uefi/commit/cfa6dca)).
+    Nothing to upstream.
