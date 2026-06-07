@@ -462,6 +462,65 @@ to investigate alternatives:
 device with a non-zero MAC. If it doesn't, the M1 agent run STOPS
 and reports.
 
+**Live M1 finding 2026-06-07 (QEMU+EDK2)**: `EFI_PCI_IO_PROTOCOL` IS
+published by EDK2 stable202408 on QEMU on every arch tested. amd64
+ran the full probe end-to-end: 7 handles enumerated, 1 virtio-net at
+(Seg,Bus,Dev,Fn) = (0,0,2,0) with DID 0x1000 (transitional), all 5
+VIRTIO_PCI_CAP_* entries detected, DeviceCfg locator at
+BAR4+offset=8192. arm64 / riscv64 / loong64 enumerated handles
+(arm64=3, riscv64=1, loong64=3) but then triggered R-M1'b (below).
+
+**Live M1 finding 2026-06-07 (Apple VZ via vfkit)**: the binary
+boots; vfkit's `virtio-serial,logFilePath=` sink captured no output.
+The VZ EFI firmware's ConOut binding does not appear to route to a
+host-visible virtio-console port. Without observable output we
+cannot confirm whether VZ publishes `EFI_PCI_IO_PROTOCOL`. The M1
+acceptance gate (vfkit reports virtio-net MAC) is therefore
+**inconclusive** on VZ as of this milestone. Two possible
+resolutions: (a) reach the netstack in M3 and exfiltrate over UDP;
+(b) probe an alternative pre-EBS observability channel (memory-mapped
+ring buffer the host inspects post-shutdown). Tracked as a M2 / M3
+prerequisite.
+
+### R-M1'b (NEW, MEDIUM, this milestone surfaced) — Per-arch HandleProtocol divergence
+
+The salvaged `protocols_tamago.go` `HandleProtocol` thunk works
+end-to-end on amd64 (validated by the M1 probe processing all 7 PCI
+handles cleanly) but faults on arm64 / riscv64 / loong64 with a
+non-canonical / misaligned function-pointer call target:
+
+|  arch    | LocateHandleBuffer | HandleProtocol | Fault address                |
+| -------- | -----------------: | -------------: | ---------------------------- |
+| amd64    |     7 handles, OK  |   OK (full M1) | n/a                          |
+| arm64    |     3 handles, OK  |        FAULT   | ELR = 0x910003FDA9BB7BFD     |
+| riscv64  |     1 handle,  OK  |        FAULT   | sepc = 0x00880E0A2E486715C   |
+| loong64  |     3 handles, OK  |        FAULT   | ERA = 0x29C0E07802FEC063     |
+
+The fault PCs on all three failing arches contain instruction-bytes
+patterns when decoded — i.e., the thunk dereferenced a code address
+as if it were a function-pointer slot. Hypotheses to investigate
+in M2:
+
+* `efiBSHandleProtocol = 152` is correct per UEFI 2.10 (spec-pinned),
+  but the per-arch EDK2 build may pad the gBS struct differently.
+  Confirm by re-deriving the offset against the locally-running EDK2
+  binary (`OpenProtocol` at +280 might land differently; spot-check).
+* The arm64 / riscv64 / loong64 thunks load 8 bytes via `MOVD (R8),R9`
+  vs amd64's `CALL (AX)` (which is x86's `call qword ptr [rax]`).
+  Semantically identical, but the latter is a single uop and
+  forecloses any intervening register clobber. Investigate whether
+  the load itself races with anything Go-side.
+* The `bs` value captured by `getBootServices()` may have been
+  reloaded incorrectly between LocateHandleBuffer and HandleProtocol
+  on the failing arches (TamaGo's GC moving package vars between
+  println and HandleProtocol — should not happen for `uint64` vars
+  in .data, but verify).
+
+M1 still ships the PCI IO bindings (validated on amd64) + the cap
+walker (host-tested, 97.4% coverage). The arm64 / riscv64 / loong64
+HandleProtocol fault gates the END-TO-END virtio-net identity demo
+on those arches; that gating is held over to M2's investigation.
+
 ### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 
 `gvisor.dev/gvisor/pkg/tcpip` is the only mature pure-Go TCP/IP stack
@@ -637,3 +696,15 @@ Per milestone, revisit at the start of the M-N agent run.
   protocol-handler service-binding helpers. M1 lands the
   `EFI_PCI_IO_PROTOCOL` bindings + virtio PCI capability discovery
   + `phase2_pcienum` probe. M1..M8 milestone list rewritten in §3.
+- **2026-06-07** (M1 live findings): R-M1'a partially answered —
+  EDK2-stable202408 on QEMU publishes `EFI_PCI_IO_PROTOCOL` on every
+  arch; M1 amd64 ran end-to-end (7 handles, virtio-net 1AF4:1000 at
+  (0,0,2,0), all 5 VIRTIO_PCI_CAP_* entries walked, DeviceCfg
+  locator BAR4+offset=8192). VZ via vfkit boots the binary but its
+  ConOut routing did not surface output through
+  `virtio-serial,logFilePath` — VZ-side M1 acceptance gate
+  inconclusive; observability fix tracked as an M2/M3 prerequisite.
+  R-M1'b NEW: per-arch HandleProtocol fault on arm64 / riscv64 /
+  loong64 (amd64 works); investigation deferred to M2. R-M0a
+  end-to-end RESOLVED (riscv64 ran past GetMemoryMap, into the M1
+  enumeration before R-M1'b's HandleProtocol fault).
