@@ -5,9 +5,10 @@ title: Three boot paths
 # Three boot paths
 
 cloud-boot ships three pipelines because no single one works on every
-hypervisor the project targets. Each path lands on the same end state
-— a stock distro userspace from an unmodified cloud image — but the
-journey is different.
+hypervisor the project targets, plus a fourth path under development
+that collapses the bootstrap stage. Each path lands on the same end
+state — a stock distro userspace from an unmodified cloud image —
+but the journey is different.
 
 ## Path A — UKI + init + kexec
 
@@ -116,15 +117,48 @@ The loader publishes `EFI_LOAD_FILE2_PROTOCOL` under
 initrd via `LoadFile2` — that's the modern initrd handoff convention
 since kernel 5.8.
 
+## Path D — TamaGo unikernel + pure-Go networking
+
+A fourth pipeline, under development. Where Path B abandoned the
+networked phases on VZ because the firmware ships no
+`HTTP`/`DHCP4`/`DNS4`, **Path D** sidesteps that by bringing its own
+**pure-Go virtio-net driver + netstack** on top of
+`EFI_PCI_IO_PROTOCOL`. The full loader is a single bare-metal Go
+binary; no Linux kernel until the final `StartImage` hands control
+to the kernel we just downloaded.
+
+```mermaid
+flowchart LR
+    A[Firmware loads<br>BOOTAA64.EFI / BOOTX64.EFI<br>TamaGo PE32+/EFI] --> B[TamaGo runtime<br>GC + scheduler + goroutines]
+    B --> C[pure-Go virtio-net<br>via EFI_PCI_IO_PROTOCOL]
+    C --> D[netstack<br>ARP + IPv4 + DHCP + DNS + TCP]
+    D --> E[crypto/tls + net/http<br>Go stdlib]
+    E --> F[OCI registry pull<br>kernel + initrd into RAM]
+    F --> G[LoadImage SourceBuffer=RAM<br>+ StartImage]
+    G --> H[Linux EFI stub<br>ExitBootServices<br>distro userspace]
+```
+
+**Status** — Phase 1 (multi-arch boot up to `main`) shipped on 4
+arches QEMU+EDK2 and on VZ. Phase 2 milestones M0–M2 shipped:
+device discovery + virtio-net driver + ARP TX/RX validated
+end-to-end on QEMU 4 arches; VZ init OK, TX/RX under diagnosis
+(R-M2c). See the [TamaGo UEFI architecture page](tamago-uefi.md)
+for the narrative and decision log.
+
+**Why a fourth path** — Path C ships and works on VZ, but it pays a
+two-boot tax and ships a full Linux kernel just to fetch the
+distro kernel. Path D collapses that to one boot in one bare-metal
+Go binary.
+
 ## Compatibility matrix
 
-| Hypervisor | Path A · kexec | Path B · pure UEFI | Path C · reboot |
-| --- | :---: | :---: | :---: |
-| QEMU/KVM (x86_64 + aarch64) | ✓ | ✓ | ✓ |
-| Apple `Virtualization.framework` | ✗ trapped | ✗ no net | **✓ primary** |
-| OpenStack Nova / libvirt / KVM | ✓ | ✓ | ✓ |
-| Bare metal UEFI | ✓ | ✓ (firmware-dependent) | ✓ |
-| EDK2 + virtio-blk-only | — | ✓ | ✓ |
+| Hypervisor | Path A · kexec | Path B · pure UEFI | Path C · reboot | Path D · TamaGo |
+| --- | :---: | :---: | :---: | :---: |
+| QEMU/KVM (x86_64 + aarch64) | ✓ | ✓ | ✓ | ✓ |
+| Apple `Virtualization.framework` | ✗ trapped | ✗ no net | **✓ primary** | ⏳ M2.x |
+| OpenStack Nova / libvirt / KVM | ✓ | ✓ | ✓ | ✓ |
+| Bare metal UEFI | ✓ | ✓ (firmware-dependent) | ✓ | ✓ (PCI IO required) |
+| EDK2 + virtio-blk-only | — | ✓ | ✓ | — (needs virtio-net) |
 
 See the [Hypervisor matrix](hypervisors.md) for which firmware
 protocols each combination exposes and which gotchas to watch for.
