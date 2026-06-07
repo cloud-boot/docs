@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; VZ cell blocked on R-M2b — feature negotiation needs widening)
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED — VZ init reaches DRIVER_OK; VZ TX deferred to R-M2c)
 last-updated: 2026-06-07
 ---
 
@@ -525,7 +525,23 @@ line (VZ).
 | QEMU+EDK2 arm64          |  OK  | OK | ARP reply from `52:55:0a:00:02:02` (NAT GW) |       5.92 s       |  PASS  |
 | QEMU+EDK2 loong64        |  OK  | OK | ARP reply from `52:55:0a:00:02:02` (NAT GW) |       5.59 s       |  PASS  |
 | QEMU+EDK2 riscv64 (transitional) | n/a | n/a | n/a (clean "no modern virtio-net" halt) |       6.54 s       |  PASS (M2.1 deferred) |
-| Apple VZ vfkit arm64     | FAIL | -  | -                                           |       ~0.2 s       |  FAIL (R-M2b) |
+| Apple VZ vfkit arm64 (initial 2026-06-07 boot) | FAIL | -  | -                                           |       ~0.2 s       |  FAIL (R-M2b) |
+| Apple VZ vfkit arm64 (post-R-M2b 2026-06-07)   | OK   | FAIL (poll budget) | n/a (TX never published a used-ring entry) |       ~30 s        |  PARTIAL — init OK, TX deferred (R-M2c) |
+
+**M2 milestone status: 4/5 PRIMARY cells fully PASS; VZ cell INIT-OK
+after R-M2b RESOLVED. VZ TX deferred to R-M2c.** The VZ rail can now
+bring the modern virtio-net device all the way through DRIVER_OK,
+publishes the device MAC, and writes the negotiated feature mask
+`0x100010028` (= `MTU | MAC | STATUS | VERSION_1`) successfully — but
+the busy-poll path doesn't observe a used-ring entry within the M2
+poll budget on either TX ARP. Production VZ acceptance therefore
+deferred to R-M2c; the R-M2b regression seam ("FEATURES_OK doesn't
+stick") is closed.
+
+The post-R-M2b VZ cell also re-confirms the M1.6 side-channel: the
+diagnostic dump (`vnet device feats: lo=0x300119ab hi=0x00000005`)
+plus the full M2 init trace + the TX/RX timeout lines all land on
+the scratch disk and recover cleanly via `cmd/blkprintk-recover`.
 
 The QEMU NAT MAC `52:55:0a:00:02:02` (transcribed `52:55:0a:00:02:02`)
 is QEMU user-mode networking's synthetic gateway MAC for the default
@@ -679,33 +695,138 @@ Risks:
   in particular ran the full 6-arg envelope against
   `PciIo.Mem.Read/Write` thousands of times during the virtio
   init + ARP RX without incident. Closed.
-- **R-M2b (NEW, HIGH) — VZ virtio-net FEATURES_OK doesn't stick.**
-  Live VZ boot surfaces this regression seam. After our `OpenVirtioNet`
-  writes `MAC | STATUS | VERSION_1` to DriverFeature and sets the
-  FEATURES_OK bit on DeviceStatus, the read-back DeviceStatus has
+- **R-M2b (HIGH, RESOLVED 2026-06-07 by accepted-features-mask widening).**
+  Live VZ boot surfaced this regression seam: after `OpenVirtioNet`
+  wrote `MAC | STATUS | VERSION_1` to DriverFeature and set
+  FEATURES_OK on DeviceStatus, the read-back DeviceStatus had
   FEATURES_OK cleared — the device rejected our negotiated subset.
-  Per Virtio 1.1 §3.1.1, the driver MUST abort. M2's
-  `ErrFeaturesNotOK` is correctly surfaced; the probe halts cleanly
-  via the M1.6 sentinel. Most-likely cause: VZ requires
-  `VIRTIO_F_ACCESS_PLATFORM` (bit 33) and/or `VIRTIO_F_RING_PACKED`
-  (bit 34). Disambiguation requires extending the M2 probe to dump
-  the device-offered feature bitmap before the AND mask (1-line
-  println in `phase2_virtionet_tx.go` after `cfg.DeviceFeatures64()`,
-  reachable only via the M1.6 side-channel since VZ ConOut still
-  doesn't route). Once known, the M2 mask in `virtio_net.go`
-  `VirtioNetAcceptedFeatures` can be widened to accept the required
-  bit (M2.0.1 patch — likely no driver-side semantic change is
-  needed for ACCESS_PLATFORM since EFI BootServicesData is already
-  identity-mapped; PACKED would require a real driver rewrite,
-  significantly more work). Until then, **Apple VZ is BLOCKED on
-  the virtio-net pure-Go rail**.
+
+  Diagnosis (live empirical narrow): extended `phase2_virtionet_tx`
+  to dump the device-offered feature bitmap before the AND mask via
+  the M1.6 blkprintk side-channel (the dump is `vnet device feats:
+  lo=0xXXXXXXXX hi=0xXXXXXXXX`, recoverable on VZ via
+  `cmd/blkprintk-recover`). VZ vfkit 0.6.3 arm64 publishes
+  `lo=0x300119ab hi=0x00000005` — i.e. set bits =
+  `{0, 1, 3, 5, 7, 8, 11, 12, 16, 28, 29, 32, 34}`. Two observations
+  from this bitmap:
+
+    * VZ **does** offer `VIRTIO_F_RING_PACKED` (bit 34); this is the
+      validation report's primary hypothesis.
+    * VZ does **NOT** offer `VIRTIO_F_ACCESS_PLATFORM` (33),
+      `VIRTIO_F_NOTIFICATION_DATA` (38), `VIRTIO_F_RING_RESET` (40),
+      `VIRTIO_F_IN_ORDER` (35), `VIRTIO_F_ORDER_PLATFORM` (36),
+      or `VIRTIO_F_SR_IOV` (37) — so none of those can be the
+      required bit.
+
+  A second-pass diagnostic in the same probe iteratively walks each
+  candidate accepted-features mask and reads DeviceStatus after
+  writing FEATURES_OK, reporting which mask survives the handshake.
+  The narrow established empirically that:
+
+    * Baseline `MAC | STATUS | VERSION_1` (= `0x100010020`): **FAILS**
+      (FEATURES_OK clears, status reads back `0x03` = ACK | DRIVER).
+    * "Everything offered except RING_PACKED" (= `lo=0x300119ab,
+      hi=0x00000001`): **STICKS** (status reads `0x0b` = ACK |
+      DRIVER | FEATURES_OK). So `RING_PACKED` is **NOT** required —
+      this is **Case A**, not Case B from the validation report's
+      decision tree.
+    * Iterating "+single-bit-on-baseline" through every offered bit:
+      ONLY `+bit3 (VIRTIO_NET_F_MTU)` makes FEATURES_OK stick. Every
+      other simpler bit candidate (CSUM, GUEST_CSUM, GUEST_TSO4,
+      GUEST_TSO6, HOST_TSO4, HOST_TSO6, HASH_REPORT, plus the
+      reserved bit 29) on its own leaves FEATURES_OK cleared.
+
+  **Fix:** widen `uefiboard.VirtioNetAcceptedFeatures` in
+  `virtio_net.go` to include `VIRTIO_NET_F_MTU` (bit 3). The bit is
+  informational per Virtio 1.1 §5.1.3 (the device publishes its MTU
+  in `virtio_net_config.mtu`; the driver MAY read it); M2 doesn't
+  read the field and continues to use the default `VirtioNetMaxFrameSize`
+  (= 1518 bytes) for the rxq buffer size. On QEMU+EDK2 the bit is
+  NOT offered by the device unless the operator sets
+  `host_mtu=` on the `virtio-net-pci` device — so accepting it is a
+  no-op on the four QEMU PASS cells (negotiated mask stays
+  `0x100010020` exactly as before).
+
+  Diff shape:
+    * `uefiboard/virtio_modern.go`: add
+      `VirtioNetFeatureMTU uint64 = 1 << 3`.
+    * `uefiboard/virtio_net.go`: extend
+      `VirtioNetAcceptedFeatures = VirtioNetFeatureMTU | …` (one OR).
+    * `uefiboard/virtio_net_test.go`: pin the mask shape + add a
+      `TestAcceptFeatures_DeviceMissingMTU` test that exercises the
+      QEMU path (device doesn't offer MTU; negotiation succeeds
+      without it).
+    * `uefiboard/virtio_modern_test.go::TestFeatureBits`: pin
+      `VirtioNetFeatureMTU = 1 << 3`.
+
+  Live post-fix VZ boot confirms FEATURES_OK sticks
+  (`status=0x0b`), `OpenVirtioNet` returns success, the device MAC
+  is read cleanly (`52:54:00:11:22:33`), negotiated features are
+  `0x100010028` (= `MTU | MAC | STATUS | VERSION_1`). The TX poll
+  on VZ then exhausts its budget without observing a used-ring
+  entry — that's a new, separate finding tracked as **R-M2c**
+  below; the R-M2b regression seam (FEATURES_OK rejection) is
+  closed.
+
+  The diagnostic feature-dump is kept in production (4 lines in
+  `phase2_virtionet_tx.go` after the PCI handle is located: open a
+  transient `VirtioModernConfig`, reset, ACK | DRIVER, read
+  `DeviceFeatures64`, print the two 32-bit halves). It's a useful
+  one-line "what does this host's virtio-net offer" smoke test for
+  any future hypervisor cell.
+
+- **R-M2c (NEW, MEDIUM) — VZ vfkit virtio-net TX descriptor never
+  returns on the used ring.** Surfaced by the post-R-M2b VZ boot
+  (init OK, device UP, MAC read, FEATURES_OK stuck). After
+  `TransmitFrame` writes the descriptor, posts the avail-ring
+  index, and writes the per-queue notify doorbell
+  (`NotifyOffMultiplier=4`, `NotifyCfgOffset=16384`,
+  `NotifyCfgLength=8`), the busy-poll on the used-ring `idx`
+  exhausts the 10000-iteration budget without observing the
+  device's publish. Bumping the budget to 500000 (50x) on a
+  prototype branch also fails — so the issue is NOT a timing
+  shortage; the device is genuinely not publishing the TX
+  descriptor to the used ring on this hypervisor.
+
+  Open hypotheses (in order of likelihood; none verified yet):
+
+    1. Apple's VZ virtio-net implementation may require additional
+       feature negotiation we haven't enabled — e.g. `IN_ORDER`
+       (bit 35) is *not* offered, but some private/vendor bit could
+       be effectively required to enable the TX path even though
+       it's not required to PASS the FEATURES_OK handshake. Bit 29
+       in VZ's bitmap is reserved per Virtio 1.1 §6 and Apple may
+       be re-using it; worth a per-bit narrow analogous to
+       R-M2b's.
+    2. The `NotifyCfgLength=8` window may not be the right write
+       address for queue 1 (TX) — vfkit may use a different
+       per-queue notify scheme (e.g. multiple notify caps, or a
+       fixed-offset shared doorbell).
+    3. Memory ordering / DMA coherency: tamago-go on arm64 issues
+       `STLR` for the avail-ring idx publish, but Apple's
+       virtualization framework may have a different visibility
+       contract than QEMU (where the host-side virtqueue read sees
+       a barrier-flushed write).
+    4. The TX queue's QueueSize / descriptor base addr may be off
+       by something subtle (e.g. needs to be physically backed by
+       a different memory type than EFI BootServicesData on VZ).
+
+  Acceptance for R-M2c: an ARP reply from `192.168.64.1` (vfkit's
+  NAT gateway) appears in the M2 probe's RX poll on VZ. Until
+  R-M2c is closed, VZ is BLOCKED at TX even though init now
+  reaches DRIVER_OK cleanly. The QEMU 4-arch PASS cells are NOT
+  affected (R-M2c is VZ-specific; the live multi-arch boot
+  regression at HEAD continues to pass with the R-M2b mask widening,
+  including the full TX/RX ARP exchange on QEMU+EDK2 amd64
+  end-to-end).
 
 Acceptance: an ARP request emitted by our driver gets an ARP reply
 visible in our RX ring on QEMU+EDK2 (any arch with PCI IO virtio-net,
-configured `disable-legacy=on,disable-modern=off`). VZ acceptance
-DEFERRED to M2.0.1 (feature-bitmap dump + mask widening) per R-M2b
-above; live-validated 4/5 cells. riscv64 acceptance deferred to
-M2.1's SNP rail.
+configured `disable-legacy=on,disable-modern=off`). VZ init-OK
+acceptance MET 2026-06-07 with the R-M2b mask widening (FEATURES_OK
+sticks, OpenVirtioNet returns success, MAC reads cleanly); full VZ
+ARP-echo acceptance DEFERRED to R-M2c (TX descriptor publish on the
+used ring). riscv64 acceptance deferred to M2.1's SNP rail.
 
 ### M2.1 — SNP wrapper (Path Y' rail, pending)
 
