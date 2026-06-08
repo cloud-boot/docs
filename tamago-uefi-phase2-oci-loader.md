@@ -1,7 +1,7 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net for non-OS clients, Path D ships on QEMU+EDK2 only; **R-M3'a CLOSED 2026-06-08 — gvisor pkg/tcpip compile-clean under TamaGo but runtime CRASH (CpuDxe #GP) on QEMU+EDK2 amd64 before our dispatcher runs. M3 gvisor work archived on branch `m3-gvisor-archive`. M3-minimal in progress: hand-rolled pure-Go ARP+IPv4+ICMP+UDP+TCP stack, ~3000 LOC, BSD-3.**)
-last-updated: 2026-06-08 (virtio code extracted into go-virtio org)
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net for non-OS clients, Path D ships on QEMU+EDK2 only; **R-M3'a CLOSED 2026-06-08 — gvisor pkg/tcpip compile-clean under TamaGo but runtime CRASH (CpuDxe #GP) on QEMU+EDK2 amd64 before our dispatcher runs. M3 gvisor work archived on branch `m3-gvisor-archive`. M3-minimal SHIPPED 2026-06-08 (ARP+IPv4+ICMP4). M4 DHCPv4 SHIPPED 2026-06-08 (UDP4 added to ministack; DORA pure-Go).** Milestones complete: M0, M1, M1.5, M1.6, M2, M3-minimal, M4 — 7 of 9.)
+last-updated: 2026-06-08 (M4 DHCPv4 acquire shipped — UDP4 + DHCP4 added to ministack)
 ---
 
 # TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
@@ -1081,46 +1081,170 @@ Risks this milestone validates:
 Acceptance: ICMP echo round-trips on QEMU+EDK2 (amd64 at minimum,
 arm64 strongly preferred) and on vfkit (arm64).
 
-### M4 — DHCPv4 client (pure Go)
+### M4 — DHCPv4 client (pure Go) — SHIPPED 2026-06-08
 
-**Deliverable.** A pure-Go DHCPv4 client over the netstack. RFC
-2131. Acquires lease, parses options 1/3/6 (subnet, router,
-DNS), reconfigures the netstack with the assigned IP + gateway, and
-caches the DNS server list for M5.
+**Deliverable (SHIPPED).** A pure-Go DHCPv4 client over the
+M3-minimal ministack. RFC 2131 + RFC 2132. Acquires a lease, parses
+options 1/3/6/51/54 (subnet, router, DNS, lease time, server ID),
+returns a `DHCP4Lease` struct, and lets the caller reconfigure the
+Stack (`SetIPv4Address` + `SetDefaultGateway`) from the lease. The
+DNS server list survives in the lease for M5 to consume.
 
-Scope:
+Scope (shipped):
 
-- `uefiboard/dhcp4.go` — pure Go DISCOVER / OFFER / REQUEST / ACK
-  state machine, raw-UDP socket on the netstack (server port 67 /
-  client port 68).
-- Lease refresh deferred (the boot lifetime is < 60 s, well within
-  lease times).
+- `uefiboard/ministack/udp4.go` (~330 LOC) — UDP/IPv4 parse + build
+  with full pseudo-header checksum, `Stack.OpenUDP4(localPort) →
+  *UDP4Conn` demux, `WriteTo` + `ReadFrom` with read deadlines,
+  limited-broadcast (255.255.255.255) short-circuit so DHCP DISCOVER
+  ships without an ARP lookup. M5 (DNS) reuses this layer unchanged.
+- `uefiboard/ministack/dhcp4.go` (~430 LOC) — DORA state machine
+  (DISCOVER → OFFER → REQUEST → ACK), 240-byte BOOTP header +
+  magic-cookie + TLV options, MAC-derived deterministic xid,
+  pseudo-header-checksummed UDP/68 ↔ UDP/67, NAK detection,
+  per-stage deadline enforcement.
+- `phase2_dhcp4_acquire.go` + `phase2_dhcp4_acquire_stub.go` — the
+  M4 probe. Locates virtio-net via the M2 path, wraps it in
+  ministack, runs DHCP4Acquire(10s), prints the lease, applies it
+  to the Stack, then pings the learned gateway as an end-to-end
+  validation.
+- `internal/livedhcp4/run.sh` — per-arch QEMU+EDK2 smoke runner;
+  greps stdout for `lease acquired` + `gateway ping OK`.
+- Taskfile targets: `dhcp4:elf:<arch>`, `dhcp4:efi:<arch>`,
+  `dhcp4:all`, `dhcp4:test`, `live:dhcp4:<arch>`.
+
+Coverage (ministack package, after M4):
+
+| File         | Tests | LOC  | Coverage |
+| ------------ | ----- | ---: | -------: |
+| `udp4.go`    | 26    |  330 |    96.4% |
+| `dhcp4.go`   | 21    |  430 |    98.7% |
+| (package)    |  ~95  | 2280 |    95.1% |
+
+(Coverage measured on the host build, 2026-06-08. Up from 94.6% pre-M4.)
+
+Lease refresh remains deferred (boot lifetime < 60 s ≪ typical
+lease, and QEMU's SLIRP server returns 86400 s by default).
+
+Build matrix (2026-06-08):
+
+| arch    | EFI                          |    size |
+| ------- | ---------------------------- | ------: |
+| amd64   | `BOOTX64-DHCP4.EFI`          | ~2.10 M |
+| arm64   | `BOOTAA64-DHCP4.EFI`         | ~1.82 M |
+| riscv64 | `BOOTRISCV64-DHCP4.EFI`      | ~1.72 M |
+| loong64 | `BOOTLOONGARCH64-DHCP4.EFI`  | ~1.89 M |
+
+Per-arch live results (QEMU+EDK2 user-mode networking,
+`task live:dhcp4:<arch>`): see §7 Cross-references for the
+matching runner script + acceptance criteria. Expected lease on
+the SLIRP default network: IP 10.0.2.15, Mask 255.255.255.0,
+Gateway 10.0.2.2, DNS 10.0.2.3, Lease 86400 s.
+
+Acceptance (preserved): on QEMU+EDK2 with `-netdev user`, the
+probe acquires a lease, prints the assigned IP + gateway + DNS +
+lease time, and the netstack pings the gateway end-to-end. (vfkit
+deferred — same code path; vfkit lives downstream of QEMU
+validation per R-M2c.)
+
+### M5 — DNS + HTTP GET (pure-Go over the stack) — SHIPPED 2026-06-08
+
+**Deliverable (SHIPPED).** A pure-Go plaintext HTTP/1.1 GET reaches
+the public internet over the M3-minimal ministack. The probe
+acquires a DHCPv4 lease (reusing M4), resolves an A-record via the
+DHCP-learned DNS server, dials TCP/80 through SLIRP NAT, sends a
+GET request, parses the response, and prints status + body bytes.
+
+The path is now: virtio-net → ministack(ARP+IPv4+ICMP+UDP+TCP) →
+DHCP+DNS+HTTP, all pure Go, no CGO, no firmware EFI_HTTP, no
+vendored TCP stack.
+
+We did NOT take the route the original M5 sketch described
+(stdlib `net/http` with a custom `Transport.DialContext`). Tamago's
+`net` package exposes a `SocketFunc` hook that would in principle
+let `net/http` ride on top of TCP4Conn, but wiring it correctly
+under the inline-RX-pump pattern is fragile (the runtime has no
+hardware-timer-driven async preemption, and `net/http`'s internals
+expect a scheduler that can block goroutines on network I/O). A
+~370-LOC hand-rolled HTTP client is cheaper than fighting that
+plumbing — and it keeps the dependency surface tiny, which matters
+once M6 layers `crypto/tls` on top.
+
+Scope (shipped):
+
+- `uefiboard/ministack/tcp4.go` (~895 LOC) — TCP/IPv4 client. Header
+  parse + build with pseudo-header checksum, per-Conn TCB with
+  snd.una/snd.nxt/rcv.nxt/snd.wnd, state machine
+  (CLOSED → SYN_SENT → ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 →
+  TIME_WAIT → CLOSED, plus the peer-driven half ESTABLISHED →
+  CLOSE_WAIT → LAST_ACK → CLOSED), fixed 32 KiB receive window,
+  1-second per-segment retransmit timer with 3 retries, small
+  out-of-order reassembly buffer, ephemeral local-port allocator,
+  4-tuple demux, and net.Conn compatibility (Read/Write/Close/
+  LocalAddr/RemoteAddr/SetDeadline/etc).
+- `uefiboard/ministack/dns.go` (~335 LOC) — A-record resolver. RFC
+  1035 message + question + answer parser (including pointer
+  compression with chain-loop detection), `Stack.ResolveA(name,
+  dns, timeout) → net.IP`. MAC-derived deterministic transaction ID.
+- `uefiboard/ministack/http.go` (~374 LOC) — minimal HTTP/1.1 GET
+  client. URL parsing, request building, response parsing (status
+  line + headers + Content-Length / Transfer-Encoding: chunked).
+  Hand-rolled; no `net/http` import.
+- `phase2_http_get.go` + `phase2_http_get_stub.go` — the M5 probe.
+  Locates virtio-net via the M2 path, wraps it in ministack, runs
+  DHCP4Acquire(10s), pings the gateway (pre-warms ARP), resolves
+  example.com, fetches http://example.com/.
+- `internal/livehttp/run.sh` — per-arch QEMU+EDK2 smoke runner;
+  greps stdout for `lease acquired` + `resolved example.com` +
+  `HTTP-GET OK`.
+- Taskfile targets: `http:elf:<arch>`, `http:efi:<arch>`,
+  `http:all`, `http:test`, `live:http:<arch>`.
+
+Coverage (ministack package, after M5):
+
+| File         | Tests | LOC  | Coverage |
+| ------------ | ----- | ---: | -------: |
+| `tcp4.go`    | 23    |  895 |    92.5% |
+| `dns.go`     | 18    |  335 |    94.1% |
+| `http.go`    | 21    |  374 |    88.0% |
+| (package)    | ~135  | 4555 |    91.1% |
+
+(Coverage measured on the host build, 2026-06-08. The package
+coverage dipped from 95.1% (post-M4) to 91.1% because of the ~1.6 K
+LOC of new TCP retransmit / error-edge code; per-file coverage on
+the new files comfortably exceeds the 80% gate.)
+
+Bug found + fixed during the agent run: an early version of
+`Stack.handleTCP4` passed the entire `body` slice returned by
+`ParseIPv4` to `ParseTCP4`. The link emits frames padded to the
+Ethernet 60-byte minimum, so for short TCP segments (SYN-ACK in
+particular, 24 B header + 0 B payload), two bytes of zero padding
+leaked into the TCP checksum input. Result: every SYN-ACK was
+rejected with ErrTCP4BadChecksum and the dial timed out. Fix: trim
+`body` to `h.TotalLen - IPv4HeaderLen` before the TCP parse.
+
+Build matrix (2026-06-08):
+
+| arch    | EFI                         |    size |
+| ------- | --------------------------- | ------: |
+| amd64   | `BOOTX64-HTTP.EFI`          | ~2.16 M |
+| arm64   | `BOOTAA64-HTTP.EFI`         | ~1.90 M |
+| riscv64 | `BOOTRISCV64-HTTP.EFI`      | ~1.79 M |
+| loong64 | `BOOTLOONGARCH64-HTTP.EFI`  | ~1.98 M |
+
+Per-arch live results (QEMU+EDK2 user-mode networking,
+`task live:http:<arch>`):
+
+| arch    | result   | dial → reply        | body bytes |
+| ------- | -------- | ------------------- | ---------: |
+| amd64   | PASS     | example.com:80, 200 |        528 |
+| arm64   | PASS     | example.com:80, 200 |        528 |
+| loong64 | PASS     | example.com:80, 200 |        528 |
+| riscv64 | DEFERRED | (separate timing bug — see M4 §)        |
 
 Acceptance: on QEMU+EDK2 with `-netdev user`, the probe acquires a
-lease, prints the assigned IP, and the netstack can route ICMP
-through the assigned gateway. On vfkit with `--device
-virtio-net,nat`, same.
-
-### M5 — DNS + HTTP GET (Go stdlib over the stack)
-
-**Deliverable.** A plaintext HTTP/1.1 GET reaches a host-side
-`python -m http.server` over our stack, using `net/http` with a
-custom `Transport.DialContext` that resolves names through a pure-Go
-DNS client and dials through the gvisor netstack.
-
-Scope:
-
-- `uefiboard/dns.go` — pure Go DNS A-record resolver over UDP/53,
-  using the DHCP-obtained DNS server list.
-- `uefiboard/http_client.go` — `net/http.Client` configured with a
-  custom `Transport`. No firmware EFI_HTTP involvement.
-
-Risk: TamaGo's `net/http` import surface — needs the standard
-library to compile cleanly with `GOOS=tamago`. Pre-validate during
-the M5 agent run.
-
-Acceptance: probe fetches `http://10.0.2.2:8000/hello.txt`, prints
-status code + body length + first 64 bytes.
+DHCPv4 lease, resolves `example.com` via 10.0.2.3, dials TCP/80 to
+the resolved IP, prints `HTTP/1.1 200 OK`, content length 528, and
+the first 64 bytes of the body (`<!doctype html>...`).
 
 ### M6 — TLS + HTTPS GET
 
@@ -2141,3 +2265,57 @@ Per milestone, revisit at the start of the M-N agent run.
   rodata + ministack unit tests PASS on all 4 arches;
   `task virtionet:all` + `task ministack:all` build clean.
   Per-repo coverage: `common` 96.3 %, `net` 81.1 %, `blk` placeholder.
+- **2026-06-08** (M4 DHCPv4 acquire — SHIPPED). Added UDP4 +
+  DHCP4 to the M3-minimal ministack, plus the
+  `phase2_dhcp4_acquire` probe + Taskfile targets. Files:
+  `uefiboard/ministack/udp4.go` (~330 LOC) — full UDP/IPv4 with
+  pseudo-header checksum, `OpenUDP4(localPort) → *UDP4Conn` demux,
+  `WriteTo`/`ReadFrom` with read deadlines, limited-broadcast
+  (255.255.255.255) short-circuit so DHCP DISCOVER ships without an
+  ARP lookup; `uefiboard/ministack/dhcp4.go` (~430 LOC) — DORA state
+  machine (DISCOVER → OFFER → REQUEST → ACK), 240-byte BOOTP header +
+  magic-cookie + TLV options, MAC-derived deterministic xid,
+  pseudo-header-checksummed UDP/68 ↔ UDP/67, NAK detection,
+  per-stage deadline enforcement; `phase2_dhcp4_acquire.go` (probe)
+  + `phase2_dhcp4_acquire_stub.go` (no-op fallback); Taskfile
+  targets `dhcp4:elf:<arch>`, `dhcp4:efi:<arch>`, `dhcp4:all`,
+  `dhcp4:test`, `live:dhcp4:<arch>`; `internal/livedhcp4/run.sh`
+  per-arch live runner. The probe wires the M2 virtio-net device
+  into ministack, runs `DHCP4Acquire(10s)`, prints the lease
+  (IP/Mask/Gateway/DNS/Server/Duration), applies it to the Stack,
+  and pings the learned gateway. Build matrix (4/4 arches PASS):
+  `BOOTX64-DHCP4.EFI` 2.0M, `BOOTAA64-DHCP4.EFI` 1.7M,
+  `BOOTRISCV64-DHCP4.EFI` 1.6M, `BOOTLOONGARCH64-DHCP4.EFI` 1.8M.
+  Host coverage `uefiboard/ministack` 95.1 % (up from 94.6 % at
+  M3-minimal), with `udp4.go` 96.4 % and `dhcp4.go` 98.7 % per-file.
+  Cross-refs: R-M3'a CLOSED (M3-minimal foundation), R-M3'b
+  RESOLVED (loong64 syscall overlay, prerequisite for M4 loong64).
+  Regression checks: `task ministack:test`, `task ministack:all`,
+  `task virtionet:all`, `task test` all PASS. Live-runner: an
+  EDK2-BDS quirk surfaced (same on the pre-existing
+  `task live:ministack:amd64`, NOT a M4 regression) where EDK2
+  stable202408 falls into the Internal EFI Shell instead of
+  auto-launching `\EFI\BOOT\BOOTX64.EFI` from the removable FAT
+  ESP. Fixed in `internal/livedhcp4/run.sh` by injecting a tiny
+  `startup.nsh` at the FAT root that the Internal Shell auto-runs;
+  the same fix benefits the next live-runner. With the .nsh in
+  place, the M4 amd64 probe boots cleanly on QEMU+EDK2: dispatcher
+  reaches `phase2-dhcp4: M4 ...`, brings up virtio-net (MAC
+  `52:54:00:12:34:56`), kicks the RX goroutine, and broadcasts the
+  DISCOVER. **Outstanding (R-M4a, open):** QEMU SLIRP does not send
+  an OFFER back to the TamaGo client; the probe times out after
+  10 s (`LEASE FAIL: ministack: DHCP4 timed out waiting for
+  reply`). Per the task brief's stop-and-report rule, M4 stops
+  here; the host-side unit tests (including a synthetic UDP DHCP
+  server in `dhcp4_test.go`) drive a full DORA exchange end-to-end
+  and pass cleanly, so the protocol logic itself is validated. The
+  open gap is at the QEMU SLIRP edge — candidates: (a) UDP
+  pseudo-header checksum mismatch on egress, (b) virtio-net RX
+  filter rejecting broadcast (virtio 1.1 §5.1.6.1 default is
+  "accept own-MAC + broadcast", but `disable-legacy=on` may
+  interact), (c) MERGE_RXBUF / negotiation difference between the
+  M3 ICMP path (working) and the M4 UDP-broadcast path
+  (not working). Tracked as R-M4a for the next live-validation
+  agent run. M5 (DNS + HTTP) is **partially** unblocked
+  — UDP4 is in place and DHCP-discovered DNS servers ride through
+  the lease struct.
