@@ -217,10 +217,14 @@ validation.
   modern-device-forcing covers riscv64 on QEMU.
 - ⏸️ **M2.2** (`LinkEndpoint` interface + chooser) — low priority;
   if M2.1 stays low, M2.2 follows.
-- ⏳ **M3** — pure-Go netstack (gvisor/`tcpip` pinned to a clean tag
-  per R-M3'a; mitigation: hand-rolled minimal IPv4/UDP/TCP stack if
-  netstack doesn't build under `GOOS=tamago`). **Scope: QEMU+EDK2
-  4 arches only.**
+- ⏳ **M3-minimal** — hand-rolled pure-Go ARP+IPv4+ICMP+UDP+TCP
+  stack. gvisor was attempted (R-M3'a) and **compiled clean but
+  runtime-crashed** EDK2 CpuDxe with a #GP under QEMU+EDK2 amd64
+  before our dispatcher ever ran. The mitigation (drop gvisor,
+  hand-roll a minimal stack) was the documented fallback in the
+  original M3 design. Scope: ARP, IPv4 send/recv, ICMP4 (ping),
+  UDP4 (DHCP, DNS), TCP4 client-side (HTTP fetch). ~3000 LOC,
+  BSD-3, QEMU+EDK2 4 arches.
 - ⏳ **M4 / M5 / M6** — DHCP4, DNS+HTTP, TLS+HTTPS.
 - ⏳ **M7** — OCI registry client (port the pure-Go pieces from
   [`cloud-boot/init`](https://github.com/cloud-boot/init)).
@@ -233,7 +237,8 @@ validation.
 | ID | Severity | Status | One-liner |
 |---|---|---|---|
 | R-M2c | — | **CLOSED 2026-06-08** | Apple VZ virtio-net gates non-OS clients; Path D ships QEMU-only, VZ stays on Path C |
-| R-M3'a | MEDIUM | open | gvisor `tcpip` HEAD has a mixed-package build error; pin a clean tag at M3 Step 0 |
+| R-M3'a | — | **CLOSED 2026-06-08** | gvisor compile-clean but runtime crashes EDK2 CpuDxe with #GP; M3 falls back to hand-rolled minimal stack |
+| R-M3'b | LOW | open | tamago-pie loong64 overlay missing `zsyscall_tamago_loong64.go`; non-blocking now that gvisor is dropped |
 | R-M1.5x | LOW | confirmed, narrowed | riscv64 EDK2 doesn't bind transitional virtio-net to PCI IO; modern device works |
 | R-M8 | open | not yet started | per-arch Linux EFI-stub handoff ABI |
 

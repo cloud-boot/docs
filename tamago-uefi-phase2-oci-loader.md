@@ -1,6 +1,6 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; **R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net TX for ALL non-OS clients (UEFI + post-EBS + packed-ring + split-ring all fail).** M2-A (RING_PACKED, PR #1) and M2-B (post-EBS direct MMIO, PR #2) both validated live on vfkit and both FAILED: M2-A negotiates FEATURES_OK with RING_PACKED but device never flips USED on TX (50k polls); M2-B reaches "flushing blkprintk pre-EBS" cleanly, runs post-EBS, but no ARP marker on bridge100 (60s capture). PRs closed as REFERENCE (code on branches stays). **Scope clarified: Path D ships on QEMU+EDK2 cells (4 arches PASS end-to-end via M2 split-ring rail); VZ remains on Path C (UKI menu-then-reboot, current production).** M3+ resume on the QEMU/cloud target.)
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net for non-OS clients, Path D ships on QEMU+EDK2 only; **R-M3'a CLOSED 2026-06-08 — gvisor pkg/tcpip compile-clean under TamaGo but runtime CRASH (CpuDxe #GP) on QEMU+EDK2 amd64 before our dispatcher runs. M3 gvisor work archived on branch `m3-gvisor-archive`. M3-minimal in progress: hand-rolled pure-Go ARP+IPv4+ICMP+UDP+TCP stack, ~3000 LOC, BSD-3.**)
 last-updated: 2026-06-08
 ---
 
@@ -1612,34 +1612,113 @@ profiles.
   M2-B `2fe25ae` after the Taskfile diagnosis round).
 - Closed PR threads carry the empirical evidence for future readers.
 
-### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
+### R-M3'a (CLOSED 2026-06-08) — gvisor/netstack incompatible with TamaGo+UEFI runtime
 
-`gvisor.dev/gvisor/pkg/tcpip` is the only mature pure-Go TCP/IP stack
-in the ecosystem. It uses `unsafe.Pointer` arithmetic and `sync`
-primitives heavily. TamaGo provides both, so this should work, but:
+**Status: CLOSED — gvisor dropped. Falling back to a hand-rolled
+minimal pure-Go IPv4 + UDP + TCP stack ("M3-minimal").**
 
-- gvisor relies on `init()` ordering and a few package globals that
-  expect a normal Linux/POSIX runtime. TamaGo's `goos=tamago` may
-  miss a hook.
-- gvisor's `tcpip/link/*` adapters assume socket-style FDs in places
-  (rawfile, fdbased). We use the `channel` adapter or write our own
-  `LinkEndpoint` directly — no FDs involved.
+Two-phase validation produced a misleading compile-clean pass and
+then a hard runtime failure:
 
-**Mitigation if it doesn't compile/run under TamaGo at M3:** drop
-gvisor and write a minimal pure-Go IPv4 + TCP + UDP stack ourselves
-(scope: ARP, IPv4 send/recv, UDP for DHCP+DNS, TCP for HTTP). This
-is a few weeks of work — preferred over Path X relapse.
+**Compile-clean check (Step 0+1, agent verdict 2026-06-08).** Pinned
+gvisor at `v0.0.0-20260604230326-c7dbb92365cd` (last `go` branch HEAD
+before the upstream-broken `pkg/tcpip/stack/bridge_test.go` of
+2026-06-05). With that tag,
+`GOOS=tamago GOARCH=<arch> go build` succeeds cleanly on
+amd64 / arm64 / riscv64 with the standard
+`linkcpuinit,linkramstart` build-tag set. loong64 fails at
+`syscall/fd_tamago.go: undefined: write` — that's a tamago-pie
+overlay gap (no `zsyscall_tamago_loong64.go`), filed separately as
+R-M3'b. The agent's report described this as "gvisor compiles clean
+under TamaGo on amd64 / arm64 / riscv64", which was true but
+incomplete.
 
-**Pre-flight finding (2026-06-07, during M2 wait):** gvisor master
-at `v0.0.0-20260605212926-cfb7c0629521` does **not** build under
-host `go build ./...` because `pkg/tcpip/stack/bridge_test.go`
-declares `package bridge_test` while no `package bridge` source
-exists in the same directory — Go rejects the mixed-package layout.
-This is an upstream gvisor issue at HEAD, not a TamaGo-specific one.
-M3 Step 0 must pin gvisor to a known-good tag (try
-`release-202?????.0` series, or the last commit before
-`bridge_test.go` landed) before any `GOOS=tamago` build attempt.
-Recorded by pre-flight host-side `go build` probe.
+**Live runtime check (this milestone close, 2026-06-08).** The M3
+`BOOTX64-NETSTACK.EFI` (gvisor LinkEndpoint adapter + ICMP-ping
+probe, ~4.4 MB) booted under QEMU q35 + EDK2 stable202408. BdsDxe
+loaded our EFI cleanly:
+
+```
+BdsDxe: loading Boot0001 "UEFI QEMU HARDDISK QM00011 " ...
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00011 " ...
+!!!! X64 Exception Type - 0D(#GP - General Protection) ...
+RIP - 000000007EF6710C ... ImageBase=000000007EF56000 (CpuDxe.dll)
+```
+
+No `phase2-netstack-ping:` line ever fires — the #GP triggers
+inside the firmware's `CpuDxe.dll` at offset `0x1110C` BEFORE our
+binary reaches the dispatcher entry. The same QEMU command line
+boots the M2 `BOOTX64-VIRTIONET.EFI` (no gvisor) clean — full
+banner, goroutine sum, M1.5 PCI walk + SNP enumeration, M2
+virtio-net device discovery all run to completion. So the gvisor
+import is the precipitating change.
+
+**Best interpretation.** TamaGo+UEFI is not the same runtime as
+TamaGo+bare-metal. Under UEFI, EDK2's CpuDxe owns the IDT, timer,
+and interrupt model; our `cpuinit_<arch>.s` sets up SP + the FPU
+and tail-calls into the TamaGo rt0 path without taking those over.
+gvisor's package init paths and scheduler use timer-driven
+preemption and stricter scheduler invariants that work fine on
+usbarmory bare-metal (where TamaGo owns the entire CPU) but
+desynchronize EDK2's CpuDxe service routines when the firmware
+later takes a timer interrupt. The first timer tick after gvisor
+init finds the IDT or stack in a state CpuDxe can't handle and
+faults.
+
+**Mitigation, per the original design doc:**
+
+> *"Mitigation if it doesn't compile/run under TamaGo at M3:
+>   drop gvisor and write a minimal pure-Go IPv4 + TCP + UDP
+>   stack ourselves (scope: ARP, IPv4 send/recv, UDP for DHCP+DNS,
+>   TCP for HTTP). This is a few weeks of work — preferred over
+>   Path X relapse."*
+
+**M3-minimal scope.**
+
+- ARP request/reply (Ethernet II broadcast, 28-byte ARP frame).
+- IPv4 send/recv: header construction + checksum, MTU 1500, no
+  fragmentation, single-interface route table.
+- ICMP4 Echo Request / Echo Reply (for the ping probe).
+- UDP4 send/recv on a single ephemeral port (M4 DHCPv4, M5 DNS).
+- TCP4 client-side state machine (SYN → ESTABLISHED → data → FIN);
+  no server, no listen, no congestion control beyond a constant
+  window (suffices for short HTTP fetches, ~M5-M7 scope).
+- ~3000 LOC total; per-arch agnostic; pure-Go on top of our
+  existing `uefiboard.VirtioNet` rail. BSD-3-Clause (our own
+  code).
+
+**Architectural commitments retained.**
+
+- Pure-Go end-to-end (R-M3'a verdict reinforces our pure-Go
+  doctrine — we no longer ship a multi-MB Apache 2.0 dep that
+  we couldn't even run).
+- gvisor stays available for any TamaGo+bare-metal consumer (not
+  our context); the LinkEndpoint adapter we wrote works at the
+  interface level — anyone porting gvisor to a runtime where it
+  actually runs can crib from that code.
+
+**Archived artifact.**
+
+The M3 gvisor work is preserved on branch
+[`m3-gvisor-archive`](https://github.com/cloud-boot/tamago-uefi/tree/m3-gvisor-archive)
+(commit `e209c49`). `main` rolls back the gvisor-specific code
+and starts fresh on M3-minimal.
+
+### R-M3'b (NEW, LOW) — tamago-pie loong64 overlay missing zsyscall_tamago_loong64.go
+
+Surfaced as a side-finding during the M3 gvisor compile-clean
+probe (2026-06-08). On `GOOS=tamago GOARCH=loong64`, importing
+`gvisor.dev/gvisor/pkg/tcpip` fails at `syscall/fd_tamago.go`
+with `undefined: write`, because tamago-pie's loong64 overlay
+does not ship a `zsyscall_tamago_loong64.go` companion to
+`syscall/zsysnum_tamago_loong64.go`. This is OUR overlay gap
+from the earlier loong64 port (`tamago-loong64-fork.patch`),
+not a gvisor problem.
+
+With gvisor dropped at R-M3'a, this risk no longer blocks M3 —
+the M3-minimal stack will be self-contained (no `syscall.write`
+dep). R-M3'b is kept open as a TODO for any future TamaGo
+component that does import `syscall`'s write surface on loong64.
 
 ### R-M0 (resolved) — `GetMemoryMap` quirks + riscv64 NULL-deref
 
