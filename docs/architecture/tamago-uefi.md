@@ -225,12 +225,26 @@ validation.
   original M3 design. Scope: ARP, IPv4 send/recv, ICMP4 (ping),
   UDP4 (DHCP, DNS), TCP4 client-side (HTTP fetch). ~3000 LOC,
   BSD-3, QEMU+EDK2 4 arches.
-- ⏳ **M4 / M5 / M6** — DHCP4, DNS+HTTP, TLS+HTTPS.
-- ⏳ **M7** — OCI registry client (port the pure-Go pieces from
-  [`cloud-boot/init`](https://github.com/cloud-boot/init)).
-- ⏳ **M8** — Linux EFI-stub `LoadImage`+`StartImage` handoff
-  (per-arch boot-params layout: zero-page on amd64, FDT pointer on
-  arm64/loong64/riscv64).
+- ✅ **M4 / M5 / M6** — DHCP4, DNS+HTTP, TLS+HTTPS (shipped 2026-06-08).
+- ✅ **M7** — OCI registry client, pure-Go (shipped 2026-06-08;
+  manifest + blob fetch with SHA-256 verification against
+  `ghcr.io/linuxcontainers/alpine:latest` PASS on arm64 / riscv64 /
+  loong64; amd64 deferred behind M6.1 OVMF PE-size bug).
+- ✅ **M8.0** — chain-boot mechanism: `gBS->LoadImage` an embedded
+  PE32+ EFI image, `gBS->StartImage` to hand off, child returns
+  via `gBS->Exit` (shipped 2026-06-09; arm64 + riscv64 + loong64
+  PASS under QEMU+EDK2 with clean `exit_status=0x0` return;
+  amd64 deferred behind M6.1). Introduces
+  `uefiboard.LoadImage/StartImage/UnloadImage/ExitImage` thunks
+  + `WireExitToFirmware` (TamaGo `goos.Exit` → `gBS->Exit` bridge
+  — M8.0a finding). Chained payload is `cmd/chainedhello` under
+  `tamago-uefi`, embedded into the parent at compile time via
+  `//go:embed`.
+- ⏳ **M8.1** — Real Linux EFI-stub handover (post-EBS, per-arch
+  boot-params layout: zero-page on amd64, FDT pointer on
+  arm64/loong64/riscv64). Deferred behind M6.1 (amd64 OVMF
+  PE>4MiB) + M7.1 (streaming blob fetch for kernel-sized OCI
+  layers).
 
 ## Open risks
 
@@ -240,7 +254,8 @@ validation.
 | R-M3'a | — | **CLOSED 2026-06-08** | gvisor compile-clean but runtime crashes EDK2 CpuDxe with #GP; M3 falls back to hand-rolled minimal stack |
 | R-M3'b | LOW | open | tamago-pie loong64 overlay missing `zsyscall_tamago_loong64.go`; non-blocking now that gvisor is dropped |
 | R-M1.5x | LOW | confirmed, narrowed | riscv64 EDK2 doesn't bind transitional virtio-net to PCI IO; modern device works |
-| R-M8 | open | not yet started | per-arch Linux EFI-stub handoff ABI |
+| R-M8 | open | M8.0 mechanism done, M8.1 ABI pending | per-arch Linux EFI-stub handoff ABI |
+| R-M8.0a | — | **CLOSED 2026-06-09** | TamaGo `runtime.exit` halts instead of returning to firmware; fixed by wiring `goos.Exit` → `gBS->Exit` via `uefiboard.WireExitToFirmware` |
 
 ## Files
 

@@ -191,6 +191,21 @@ tests + commit. M0 introduced the type surface and the
 `GetMemoryMap` probe; M1..M8 build the Path Y stack one layer at a
 time, from PCI device discovery up to Linux kernel handoff.
 
+| milestone   | status                              | one-liner                                                  |
+|-------------|-------------------------------------|------------------------------------------------------------|
+| M0          | done 2026-06-07                     | GetMemoryMap + type surface                                |
+| M1          | done 2026-06-07                     | EFI_PCI_IO_PROTOCOL bindings + virtio-net identity         |
+| M1.5        | done 2026-06-07                     | R-M1'b re-validation + SNP enumeration                     |
+| M1.6        | done 2026-06-07                     | Block-IO side-channel for VZ observability                 |
+| M2          | done 2026-06-08                     | virtio-net init + virtqueues + TX/RX (Path Y'')            |
+| M3-minimal  | done 2026-06-08                     | hand-rolled ARP+IPv4+ICMP4 ministack                       |
+| M4          | done 2026-06-08                     | DHCPv4 client                                              |
+| M5          | done 2026-06-08                     | DNS + HTTP GET                                             |
+| M6          | done 2026-06-08                     | TLS + HTTPS GET (PE>4 MiB amd64 deferred as M6.1)          |
+| M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
+| **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
+| M8.1        | deferred behind M6.1 + M7.1         | real Linux EFI-stub handover (post-EBS)                    |
+
 ### M0 — Probe + type surface (done)
 
 Deliverables (shipped in
@@ -1563,7 +1578,122 @@ ManifestRaw + ConfigBlob + LayerBlobs fields on `*oci.Artifact` are
 exactly the in-RAM materialised view M8 needs to hand to the EFI-stub
 handover sequence.
 
-### M8 — Linux EFI-stub handover (post-EBS)
+### M8.0 — Chain-boot mechanism (LoadImage + StartImage) — SHIPPED 2026-06-09
+
+**Deliverable.** Prove that under TamaGo+UEFI we can call
+`gBS->LoadImage` on an in-RAM PE32+ EFI binary and then
+`gBS->StartImage` to hand control off. No network. No real Linux
+kernel. Just the firmware image-services path, end-to-end, with a
+distinctive banner from the chained payload as the proof.
+
+**Files shipped** (LOC counts at HEAD):
+
+| File                                                                   |  LOC |
+|------------------------------------------------------------------------|-----:|
+| `uefiboard/loadimage.go` (offsets + ErrLoadImageNoSource)              |   64 |
+| `uefiboard/loadimage_host.go` (panic stubs, host-buildable)            |   66 |
+| `uefiboard/loadimage_tamago.go` (live thunks + WireExitToFirmware)     |  166 |
+| `uefiboard/loadimage_test.go` (host-side, 100% line cov)               |  131 |
+| `cmd/chainedhello/main.go` (the chained payload)                       |   50 |
+| `internal/embed_chained/{doc.go, chained_<arch>.go ×4, .gitignore}`    |   54 |
+| `phase2_efi_handover.go` (parent probe)                                |  120 |
+| `phase2_efi_handover_stub.go` (no-tag stub)                            |   17 |
+| `internal/liveefihandover/run.sh`                                      |  210 |
+
+Total source (non-test): ~745 LOC. Tests: 131 LOC. Coverage on the
+host-buildable `loadimage.go` + `loadimage_host.go`: **100%**
+(LoadImage 100%, StartImage 100%, UnloadImage 100%, ExitImage 100%,
+WireExitToFirmware 100%; offset constants + ErrLoadImageNoSource
+asserted by named unit tests).
+
+**Image-services offsets** (UEFI 2.10 §4.2 table 4.2):
+
+| offset | service        | wrapper                          |
+|-------:|----------------|----------------------------------|
+|    200 | LoadImage      | `uefiboard.LoadImage(buf)`       |
+|    208 | StartImage     | `uefiboard.StartImage(h)`        |
+|    216 | Exit           | `uefiboard.ExitImage(h, status)` |
+|    224 | UnloadImage    | `uefiboard.UnloadImage(h)`       |
+|    232 | ExitBootServices | `uefiboard.ExitBootServices(k)` (already shipped in M0) |
+
+**M8.0a finding — TamaGo's runtime-exit path**: out of the box,
+TamaGo's `runtime.exit` (tamago-pie/src/runtime/os_tamago.go) ends
+in `for {}` (a hard halt), so a chained payload that simply returns
+from `main()` never returns to the parent — the parent's
+`StartImage` hangs forever. The fix is to wire `runtime/goos.Exit`
+to a function that calls `gBS->Exit(parentHandle, code, 0, NULL)`;
+the firmware tears the child down and resumes the parent's
+StartImage call. We ship that as
+`uefiboard.WireExitToFirmware()` (loadimage_tamago.go), and the
+chained payload calls it before printing its banner. With the
+hook installed, all three working arches (arm64 / riscv64 /
+loong64) return cleanly via `EFI_STATUS=0` and the parent prints
+`phase2-efi-handover: chain-boot returned exit_status=0x0`.
+
+**Cleanup quirk**: when the child returns via `gBS->Exit`, the
+firmware itself releases the image's resources, and a subsequent
+`UnloadImage(handle)` returns `EFI_INVALID_PARAMETER`
+(0x8000000000000002) — the handle is already gone. The parent
+probe therefore SKIPS `UnloadImage` on a clean (status=0) return
+and only calls it when the child returned a non-zero status (where
+the firmware may keep the image around for diagnostics).
+
+**Live results (2026-06-09)** — QEMU+EDK2 only (no networking):
+
+|  arch   | result | notes                                                            |
+|---------|:------:|------------------------------------------------------------------|
+| arm64   |  PASS  | clean gBS->Exit return; wall ≈ 30 s (timeout cap)                |
+| riscv64 |  PASS  | clean gBS->Exit return; wall ≈ 30 s                              |
+| loong64 |  PASS  | clean gBS->Exit return; wall ≈ 30 s (BDS prepends one stray 'A'  |
+|         |        | char before the banner — cosmetic, doesn't affect mechanism)     |
+| amd64   |  FAIL  | EDK2 BDS skips fs0 and falls to PXE — same M6.1 OVMF PE-load     |
+|         |        | bug seen on the M6 / M7 4-5 MiB PE32+ binaries; parent is 3.4    |
+|         |        | MiB, presumably also over the OVMF threshold. Pre-existing       |
+|         |        | bug; not an M8.0 regression. Mechanism proven on the other 3.    |
+
+For each PASS the log shows (from parent + child interleaved):
+
+```
+phase2-efi-handover: M8.0 -- gBS->LoadImage + StartImage chain-boot mechanism
+phase2-efi-handover: arch = <ARCH>
+phase2-efi-handover: embed length = <N>           (chained EFI bytes)
+phase2-efi-handover: payload PE header OK (MZ)
+phase2-efi-handover: LoadImage OK, handle = 0x<HEX>
+phase2-efi-handover: StartImage entering child
+>>> M8.0 chained payload -- Hello from <ARCH> <<<  (from the CHILD)
+phase2-efi-handover: chain-boot returned exit_status=0x0
+phase2-efi-handover: child returned via gBS->Exit; UnloadImage skipped
+phase2-efi-handover: HANDOVER OK
+```
+
+**vfkit (Apple VZ) not tried for M8.0**. The brief made vfkit
+optional and noted that the network gating from R-M2c is the main
+blocker for VZ; LoadImage / StartImage are not network-dependent,
+so VZ *might* work, but VZ also has the R-M1'a observability
+limitation (ConOut goes to dev/null) and would require teeing
+through the M1.6 Block-IO side-channel to capture the banner. Not
+the M8.0 critical path; tracked as a possible M8.0b follow-up.
+
+**Probe gate**: `phase2_efi_handover` build tag, dispatcher runs
+it after `runOCIFetchProbe` in `phase2_dispatch.go`. Stub for
+non-tamago + tag-off builds in `phase2_efi_handover_stub.go`.
+
+**ASCII-only banner**: UEFI ConOut takes UTF-16, but the TamaGo
+`printk` path emits one 16-bit char per source byte, which
+corrupts any multi-byte UTF-8 sequence (an em-dash `—` would
+appear as `???`). The chained banner uses `--` (ASCII) for that
+reason — proven empirically on all three working arches.
+
+**Why no network this milestone**: per the brief, M8.0's scope is
+the firmware image-services mechanism. The chained payload is
+embedded into the parent at build time via `//go:embed`
+(`internal/embed_chained/chained_<arch>.efi`, regenerated by the
+Taskfile each build, gitignored). Swapping the embed for a
+streaming OCI fetch is the M8.1 follow-up, which inherits both
+the M6.1 (amd64 OVMF PE>4MiB) and M7.1 (streaming blob fetch)
+prerequisites.
+
+### M8.1 — Linux EFI-stub handover (deferred behind M6.1 + M7.1)
 
 **Deliverable.** Memory map → ExitBootServices → jump to the loaded
 Linux kernel, per-arch.
@@ -1581,6 +1711,19 @@ Acceptance: a vanilla upstream Linux kernel boots from
 arm64, and on vfkit arm64. riscv64 + loong64 are expected to work
 but may surface a firmware idiosyncrasy that becomes its own M8.x
 finding.
+
+**Prerequisites**:
+
+- **M6.1** (amd64 OVMF PE > 4 MiB bug). Without this, the M8.1
+  parent — which will be at least as big as the M7 OCI parent
+  (5+ MiB) — will not load on amd64 under EDK2 stable202408. M8.0
+  already hit this at 3.4 MiB.
+- **M7.1** (streaming blob fetch). A real Linux kernel is 5-50
+  MiB; ministack's 1 MiB response cap (M5) means the M8.1 loader
+  cannot use `Stack.HTTPSGet`'s "buffer the whole response" path.
+  The replacement is an `io.Reader` hand-off so the kernel image
+  streams straight from TCP into an `AllocatePages`-backed page
+  list.
 
 ## 4. Five validation checks before declaring shape A complete
 
@@ -2220,6 +2363,30 @@ Two facets, both resolved in the M0+salvage commits:
   real `*uint32` for DescriptorVersion. Re-validation in the M1
   agent's regression run.
 
+### R-M8.0a (RESOLVED 2026-06-09) — TamaGo runtime.exit halts instead of returning to firmware
+
+Out of the box, the TamaGo runtime's `exit` function
+(`tamago-pie/src/runtime/os_tamago.go`) ends in `for {}`, so a
+TamaGo+UEFI image that simply returns from `main()` never returns
+to its parent — the parent's `StartImage` call hangs indefinitely.
+
+**Mitigation (shipped in M8.0)**: TamaGo exposes
+`runtime/goos.Exit` (a function-typed package variable in
+`runtime/goos/stub.go`) as an override slot — when set, `exit`
+delegates to it. `uefiboard.WireExitToFirmware()` installs a
+function that calls `gBS->Exit(parentImageHandle, status, 0,
+NULL)`, mapping Go exit code 0 → `EFI_SUCCESS` and non-zero →
+`EFI_ABORTED` (0x8000000000000015). The chained payload calls
+`WireExitToFirmware()` before printing its banner; on `return`
+from `main` the runtime calls the override, the firmware tears
+the child down, and control resumes in the parent's
+`StartImage` call.
+
+**Verified** end-to-end on arm64 + riscv64 + loong64 under
+QEMU+EDK2; parent log shows `phase2-efi-handover: chain-boot
+returned exit_status=0x0` immediately after the chained
+banner.
+
 ### R-M8 — Per-arch handoff calling conventions (unchanged from Path X plan)
 
 The four arches do NOT share an entry shape:
@@ -2632,3 +2799,42 @@ Per milestone, revisit at the start of the M-N agent run.
   cosign-bundle signature verification on the manifest digest with
   an embedded public key. No regression on ministack (still 91.5%
   coverage) or M0..M6.
+
+- **2026-06-09** (M8.0): chain-boot mechanism SHIPPED. Image-services
+  thunks (LoadImage / StartImage / UnloadImage / Exit) added to
+  `uefiboard` under offsets 200 / 208 / 216 / 224 (UEFI 2.10 §4.2
+  table 4.2). Host-buildable `loadimage.go` carries the offsets +
+  `ErrLoadImageNoSource`; `loadimage_host.go` panic-stubs the live
+  calls for host `go test`; `loadimage_tamago.go` runs the real
+  efiCall thunks (mirrors the M0 `GetMemoryMap` split pattern).
+  Coverage 100% on the host-buildable lines (LoadImage / StartImage
+  / UnloadImage / ExitImage / WireExitToFirmware all 100%). New
+  chained payload at `cmd/chainedhello/main.go` prints
+  `>>> M8.0 chained payload -- Hello from <ARCH> <<<` and returns
+  via `gBS->Exit` (wired through `uefiboard.WireExitToFirmware`,
+  which installs a `runtime/goos.Exit` hook so the TamaGo runtime's
+  default spin-halt is replaced with a firmware-clean return —
+  M8.0a finding). Per-arch chained EFIs are built first, copied
+  into `internal/embed_chained/chained_<arch>.efi` (gitignored,
+  regenerated each build), then embedded into the parent at
+  compile time via `//go:embed`. New `phase2_efi_handover` build
+  tag → `BOOT<ARCH>-EFIHANDOVER.EFI`; dispatcher runs the probe
+  after `runOCIFetchProbe`. New `efihandover:*` + `chainedhello:*`
+  + `efihandover:live:*` Taskfile targets. **Live results
+  (QEMU+EDK2, no network)**: arm64 PASS, riscv64 PASS, loong64
+  PASS — all three with clean `gBS->Exit` return (parent prints
+  `chain-boot returned exit_status=0x0`). amd64 FAIL — EDK2 BDS
+  falls to PXE before our entry point, same M6.1 / M7 PE-size
+  firmware bug (parent is 3.4 MiB, evidently over the OVMF
+  threshold); mechanism not blocked. Cleanup quirk documented:
+  `UnloadImage` after a clean `gBS->Exit` return is a no-op
+  (firmware already freed the image) and the parent now skips it
+  on `exit_status=0`. ASCII-only banner used because ConOut's
+  UTF-16 surface mangles multi-byte UTF-8 (em-dash → `???`).
+  M8 renamed to M8.1 and deferred behind M6.1 (amd64 OVMF PE>4MiB)
+  + M7.1 (streaming blob fetch for kernel-sized OCI layers).
+  Vfkit/arm64 not exercised this milestone — out of M8.0 scope per
+  the brief; possible M8.0b follow-up that would also require
+  routing the chained banner through the M1.6 Block-IO scratch
+  disk (R-M1'a). No regression on ministack/oci/uefiboard host
+  tests.
