@@ -1704,7 +1704,7 @@ The M3 gvisor work is preserved on branch
 (commit `e209c49`). `main` rolls back the gvisor-specific code
 and starts fresh on M3-minimal.
 
-### R-M3'b (NEW, LOW) — tamago-pie loong64 overlay missing zsyscall_tamago_loong64.go
+### R-M3'b (RESOLVED 2026-06-08) — tamago-pie loong64 overlay missing zsyscall_tamago_loong64.go
 
 Surfaced as a side-finding during the M3 gvisor compile-clean
 probe (2026-06-08). On `GOOS=tamago GOARCH=loong64`, importing
@@ -1715,10 +1715,36 @@ does not ship a `zsyscall_tamago_loong64.go` companion to
 from the earlier loong64 port (`tamago-loong64-fork.patch`),
 not a gvisor problem.
 
-With gvisor dropped at R-M3'a, this risk no longer blocks M3 —
-the M3-minimal stack will be self-contained (no `syscall.write`
-dep). R-M3'b is kept open as a TODO for any future TamaGo
-component that does import `syscall`'s write surface on loong64.
+**Fix (2026-06-08).** Investigation revealed that the
+`syscall/` portion of the loong64 overlay had not been applied
+to the local tamago-pie checkout at all — three files were
+missing rather than just one:
+
+- `src/syscall/zsyscall_tamago_loong64.go` (the `write` stub —
+  the symbol `fd_tamago.go:166` was looking for)
+- `src/syscall/zsysnum_tamago_loong64.go` (`SYS_WRITE = 1`)
+- `src/syscall/asm_tamago_loong64.s` (`Syscall` ABI thunk to
+  `runtime·syscall`)
+
+All three files are already documented in
+`cloud-boot/docs/tamago-go-loong64-core.patch` (lines 468–535
+of the patch); they were simply absent from the local checkout.
+Each is a direct mirror of its riscv64 sibling. No patch update
+was needed — the patch was already authoritative; the local
+checkout had drifted from it.
+
+Build matrix verification (2026-06-08, all four ministack EFIs):
+
+| arch    | EFI                               | size   |
+| ------- | --------------------------------- | -----: |
+| amd64   | `BOOTX64-MINISTACK.EFI`           |  ~2.0M |
+| arm64   | `BOOTAA64-MINISTACK.EFI`          |  ~1.7M |
+| riscv64 | `BOOTRISCV64-MINISTACK.EFI`       |  ~1.6M |
+| loong64 | `BOOTLOONGARCH64-MINISTACK.EFI`   |  ~1.8M |
+
+This unblocks M4 (DHCP), M5 (DNS), M6 (TLS), and M7 (OCI) on
+loong64, all of which transitively import `net` (and thus
+`syscall`).
 
 ### R-M0 (resolved) — `GetMemoryMap` quirks + riscv64 NULL-deref
 
