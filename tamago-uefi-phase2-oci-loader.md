@@ -1,7 +1,7 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
-status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c diagnosed as Case IV — VZ host-side virtio-net never reads the avail ring from a UEFI-context client. SNP is NOT a viable VZ workaround — VZ doesn't publish SNP per the §3 capability matrix. Two empirical paths under live test on parallel branches: (A) accept VIRTIO_F_RING_PACKED + implement packed-ring virtqueue; (B) defer virtio-net init to post-ExitBootServices and drive the device via direct MMIO from bare metal. Whichever wins becomes the VZ rail.)
-last-updated: 2026-06-07
+status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; **R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net TX for ALL non-OS clients (UEFI + post-EBS + packed-ring + split-ring all fail).** M2-A (RING_PACKED, PR #1) and M2-B (post-EBS direct MMIO, PR #2) both validated live on vfkit and both FAILED: M2-A negotiates FEATURES_OK with RING_PACKED but device never flips USED on TX (50k polls); M2-B reaches "flushing blkprintk pre-EBS" cleanly, runs post-EBS, but no ARP marker on bridge100 (60s capture). PRs closed as REFERENCE (code on branches stays). **Scope clarified: Path D ships on QEMU+EDK2 cells (4 arches PASS end-to-end via M2 split-ring rail); VZ remains on Path C (UKI menu-then-reboot, current production).** M3+ resume on the QEMU/cloud target.)
+last-updated: 2026-06-08
 ---
 
 # TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
@@ -1543,6 +1543,74 @@ Status: **HIGH**. Triage path:
    for packed-ring (M2.0.1 proper, ~300 LOC + tests).
 4. Either way: re-confirm all 4 currently-PASS cells still PASS
    after the change.
+
+### R-M2c (CLOSED 2026-06-08) — Apple VZ gates virtio-net TX for ALL non-OS clients
+
+Two parallel experiments were run live on vfkit (Apple Silicon arm64)
+to determine whether Apple VZ's virtio-net could be driven to TX by a
+TamaGo unikernel client. Both **failed**.
+
+**M2-A (RING_PACKED + packed-ring virtqueue, PR #1, branch
+`m2-a-ring-packed`).** Accepts `VIRTIO_F_RING_PACKED` (bit 34) on the
+feature mask; implements the packed-ring layout per Virtio 1.1 §2.7.
+Under vfkit, `FEATURES_OK` sticks with RING_PACKED accepted
+(`status=0x0f`), the descriptor table + driver-event-suppression
+areas are populated, the doorbell is written — but the device never
+flips the `USED` flag on the TX descriptor across 50 000 poll
+iterations. The same M2-A binary on QEMU+EDK2 arm64 with
+`-device virtio-net-pci,packed=on` works end-to-end (TX OK,
+ARP reply from `52:55:0a:00:02:02`). So the packed-ring code is
+sound; VZ is the failing side.
+
+**M2-B (post-ExitBootServices direct MMIO, PR #2, branch
+`m2-b-post-ebs`).** Captures all PCI cap / BAR / feature / ring
+state pre-EBS via the M1.6 blkprintk side-channel, then calls
+`gBS->ExitBootServices`, then drives virtio-net by direct
+`unsafe.Pointer` MMIO from bare-metal Go (no Boot Services). The
+pre-EBS dump on vfkit is clean — `writeCount=1 payloadBytes=4043`,
+ending at "flushing blkprintk side-channel pre-EBS" — the last
+println before the EBS call. vfkit runs the VM for the full 60 s
+watchdog window after EBS (consistent with the probe sitting in
+`postEBSHalt` spin loop). `sudo tcpdump -i bridge100 -n arp` for
+60 s captures **no ARP marker** at src `169.254.2.66` / dst
+`169.254.99.99`. The post-EBS TX submission did not result in a
+frame on the wire.
+
+**Joint interpretation.** Pre-R-M2c the cloud-boot loader README
+had this note: *"virtio-net rejects FEATURES_OK from any
+UEFI-context client"* on VZ. Combined with R-M2b's MTU-bit
+discovery and now R-M2c's empirical finding that even a packed-ring
+client (M2-A) and a post-EBS direct-MMIO client (M2-B) both fail,
+the gate is broader than "UEFI-context": **Apple VZ's virtio-net
+back-end services only OS-recognized guest drivers** (Linux's
+in-kernel virtio-net being the verified working one). Anything
+else — pre-EBS UEFI, post-EBS bare-metal, packed-ring, split-ring
+— is silently dropped at the device boundary. This matches Apple's
+broader pattern of gating VZ-emulated devices to "supported guest"
+profiles.
+
+**Verdict + scope clarification.**
+
+- **Path D ships on QEMU+EDK2** (4 arches PASS end-to-end via the
+  M2 split-ring rail; ARP reply observed on QEMU NAT).
+- **VZ does NOT get Path D.** Path C (UKI menu-then-reboot) remains
+  the Apple Silicon production rail.
+- Both PRs (#1, #2) close as REFERENCE / archive. The branches
+  stay (don't delete) so anyone else can resume from the captured
+  context if the VZ device profile ever opens up.
+- M3+ resume on the QEMU/cloud target only; we don't carry an
+  unsupported-VZ branch through gvisor netstack, DHCP, OCI, etc.
+- M2.1 (SNP wrapper) and M2.2 (chooser) become low-priority — SNP
+  isn't published on VZ (R-M1'a matrix); on QEMU+EDK2 modern devices
+  PCI IO covers all 4 arches. M2.1 retains marginal value for
+  legacy-only firmware setups.
+
+**Branch references for the archived work.**
+
+- `cloud-boot/tamago-uefi` branches: `m2-a-ring-packed`,
+  `m2-b-post-ebs` (last commits before close: M2-A `1252423`,
+  M2-B `2fe25ae` after the Taskfile diagnosis round).
+- Closed PR threads carry the empirical evidence for future readers.
 
 ### R-M3'a (MEDIUM) — gvisor/netstack under TamaGo
 

@@ -106,20 +106,35 @@ hypervisor-by-arch matrix without a per-platform code split.
 
 Validated end-to-end as of M2:
 
-| Hypervisor / arch | PCI IO virtio-net | SNP | M2 driver TX/RX |
-|---|:---:|:---:|---|
-| QEMU+EDK2 amd64 | ✓ | ✓ | **PASS** (1.87 s) |
-| QEMU+EDK2 arm64 | ✓ | ✓ | **PASS** (5.92 s) |
-| QEMU+EDK2 loong64 | ✓ | ✓ | **PASS** (5.59 s) |
-| QEMU+EDK2 riscv64 (modern device) | ✓ | ✓ | **PASS** (6.54 s) |
-| QEMU+EDK2 riscv64 (transitional) | ✗ R-M1.5x | ✓ | needs Y' rail |
-| Apple VZ vfkit arm64 | ✓ | ✗ | init PASS, TX/RX open (R-M2c) |
+| Hypervisor / arch | PCI IO virtio-net | SNP | M2 driver TX/RX | Path |
+|---|:---:|:---:|---|---|
+| QEMU+EDK2 amd64 | ✓ | ✓ | **PASS** (1.87 s) | **Path D** |
+| QEMU+EDK2 arm64 | ✓ | ✓ | **PASS** (5.92 s) | **Path D** |
+| QEMU+EDK2 loong64 | ✓ | ✓ | **PASS** (5.59 s) | **Path D** |
+| QEMU+EDK2 riscv64 (modern device) | ✓ | ✓ | **PASS** (6.54 s) | **Path D** |
+| QEMU+EDK2 riscv64 (transitional) | ✗ R-M1.5x | ✓ | needs Y' rail (low priority) | Path D (force modern) |
+| Apple VZ vfkit arm64 | ✓ | ✗ | **FAIL — R-M2c CLOSED, see below** | **Path C** (UKI menu-then-reboot) |
 
 The cells are real boots, not theoretical. The QEMU runs use
 `-device virtio-net-pci,disable-legacy=on,disable-modern=off`
 to force the modern virtio device (RFC-conformant device-id `0x1041`);
 without that flag QEMU defaults to the transitional device and
 EDK2-stable202408 doesn't bind it to PCI IO (R-M1.5x).
+
+**Apple VZ is on Path C, not Path D.** Two parallel experiments
+were run live (PR #1 M2-A packed-ring, PR #2 M2-B post-EBS direct
+MMIO) and both confirmed that VZ's virtio-net back-end ignores
+non-Linux guest drivers regardless of feature mask or pre/post-EBS
+context. The packed-ring negotiation succeeds (FEATURES_OK sticks)
+but the device never flips USED on TX; the post-EBS direct-MMIO
+client gets through `ExitBootServices` cleanly but no ARP marker
+appears on the host bridge. The conclusion is that Apple's VZ
+device profiles only service OS-recognized guests (Linux's
+in-kernel virtio-net); bare-metal Go can't reach the wire.
+Path C (UKI menu-then-reboot) remains the production rail on
+Apple Silicon. Detailed evidence in
+[`tamago-uefi-phase2-oci-loader.md`](https://github.com/cloud-boot/docs/blob/main/tamago-uefi-phase2-oci-loader.md)
+§5 R-M2c CLOSED.
 
 ## The three quirks that mattered
 
@@ -193,17 +208,19 @@ validation.
   PCI IO; SNP enumeration as the complementary rail; block-IO
   side-channel for VZ observability; VZ capability matrix surfaced.
 - ✅ **Phase 2 M2** — pure-Go virtio-net driver with feature
-  negotiation, virtqueue allocation, ARP TX/RX. **4/5 cells PASS
-  end-to-end** (QEMU 4 arches). VZ init OK + R-M2c open (TX
-  descriptor doesn't complete in the used ring; under
-  investigation).
-- ⏳ **M2.1** — SNP wrapper to back the rail Y' (mostly for legacy
-  riscv64 binding gap; less critical now that modern-device-forcing
-  works on riscv64).
-- ⏳ **M2.2** — `LinkEndpoint` interface + runtime chooser.
+  negotiation, virtqueue allocation, ARP TX/RX. **4/5 QEMU+EDK2
+  cells PASS end-to-end**. VZ tested via both M2-A (RING_PACKED
+  packed-ring) and M2-B (post-EBS direct MMIO) and BOTH FAIL —
+  see R-M2c CLOSED below for the empirical evidence. **Path D
+  scope is QEMU/EDK2 only**; VZ stays on Path C.
+- ⏸️ **M2.1** (SNP wrapper) — low priority; SNP not on VZ, and
+  modern-device-forcing covers riscv64 on QEMU.
+- ⏸️ **M2.2** (`LinkEndpoint` interface + chooser) — low priority;
+  if M2.1 stays low, M2.2 follows.
 - ⏳ **M3** — pure-Go netstack (gvisor/`tcpip` pinned to a clean tag
   per R-M3'a; mitigation: hand-rolled minimal IPv4/UDP/TCP stack if
-  netstack doesn't build under `GOOS=tamago`).
+  netstack doesn't build under `GOOS=tamago`). **Scope: QEMU+EDK2
+  4 arches only.**
 - ⏳ **M4 / M5 / M6** — DHCP4, DNS+HTTP, TLS+HTTPS.
 - ⏳ **M7** — OCI registry client (port the pure-Go pieces from
   [`cloud-boot/init`](https://github.com/cloud-boot/init)).
@@ -215,7 +232,7 @@ validation.
 
 | ID | Severity | Status | One-liner |
 |---|---|---|---|
-| R-M2c | HIGH | open | VZ TX descriptor never completes in used ring; under diagnosis |
+| R-M2c | — | **CLOSED 2026-06-08** | Apple VZ virtio-net gates non-OS clients; Path D ships QEMU-only, VZ stays on Path C |
 | R-M3'a | MEDIUM | open | gvisor `tcpip` HEAD has a mixed-package build error; pin a clean tag at M3 Step 0 |
 | R-M1.5x | LOW | confirmed, narrowed | riscv64 EDK2 doesn't bind transitional virtio-net to PCI IO; modern device works |
 | R-M8 | open | not yet started | per-arch Linux EFI-stub handoff ABI |
