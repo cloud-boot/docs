@@ -1879,3 +1879,39 @@ Per milestone, revisit at the start of the M-N agent run.
   `mformat` / `mmd` / `mcopy` (the same toolchain
   `cloud-boot/iso` uses for the ISO ESP). Validation captures
   retained in operator's workspace, not committed.
+- **2026-06-08** (M2-B silent-fail diagnosis): R-M2c Option B branch
+  `cloud-boot/tamago-uefi@m2-b-post-ebs` appeared to be silent on
+  Apple VZ via vfkit — `blkprintk-recover` reported
+  `writeCount=0 payloadBytes=0` after a 15+ minute run, suggesting
+  the M2-B binary never wrote its first pre-EBS line. Diagnosis:
+  the silence was a **Taskfile staging regression**, not a code or
+  VZ-level gate. Two bugs in the `live:vz:m2b` task:
+  (1) the scratch image was created with plain `dd if=/dev/zero`
+  and never stamped with `uefiboard.BlkPrintkScratchMagic` —
+  `phase2_blkprintk.go:runBlkPrintkSetup` binds the side-channel
+  ring ONLY to the disk whose first 16 bytes match the
+  `cloudboot-M1.6\0\0` sentinel, so an unmarked scratch made the
+  probe degrade to ConOut-only, and Apple VZ captures 0 bytes of
+  ConOut (R-M1'a's original symptom); (2)
+  `cmd/blkprintk-recover` takes `-in <path>` but the Taskfile
+  passed the path positionally, which printed `usage:` + exit 2
+  instead of dumping the scratch — masking the actual contents.
+  Fix in `cloud-boot/tamago-uefi@f76f78b`: insert
+  `cd "$TASKFILE_DIR" && go run ./cmd/blkprintk-seed -out
+  $SCRATCH -size-mib 1` before the ESP staging, and pass `-in`
+  to the recover invocation. Post-fix `task live:vz:m2b
+  TIMEOUT=30` recovers `writeCount=1 payloadBytes=4043` with
+  the full pre-EBS dump ending at `phase2-m2b: flushing
+  blkprintk side-channel pre-EBS` — the last println before
+  `ExitToBareMetal`. The M2-B binary is NOT silent; it runs
+  through `CapturePreEBS` cleanly on VZ (MAC read, BAR-base
+  resolution, feature negotiation, queue page allocation, scratch
+  allocation) and reaches the EBS boundary. Whether the post-EBS
+  TX path then unblocks VZ virtio-net is the R-M2c Option B
+  question proper and is unaffected by this fix; the host-side
+  observable is the ARP marker (`src 169.254.2.66 / dst
+  169.254.99.99 / payload "M2B!"`), which requires sudo tcpdump
+  on the vfkit NAT bridge (`SUDO_CAPTURE=1`) and is the next
+  validation step. The QEMU 4-arch PASS cells are unaffected
+  (M2-B binary uses the same pre-EBS pipeline; only post-EBS
+  behaviour differs from M2).
