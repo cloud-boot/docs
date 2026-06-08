@@ -1,7 +1,7 @@
 ---
 title: TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
 status: design / in-progress (M0..M1.6 done; M2 SHIPPED + LIVE-VALIDATED 4/5 cells; R-M2b RESOLVED; R-M2c CLOSED 2026-06-08 — Apple VZ gates virtio-net for non-OS clients, Path D ships on QEMU+EDK2 only; **R-M3'a CLOSED 2026-06-08 — gvisor pkg/tcpip compile-clean under TamaGo but runtime CRASH (CpuDxe #GP) on QEMU+EDK2 amd64 before our dispatcher runs. M3 gvisor work archived on branch `m3-gvisor-archive`. M3-minimal in progress: hand-rolled pure-Go ARP+IPv4+ICMP+UDP+TCP stack, ~3000 LOC, BSD-3.**)
-last-updated: 2026-06-08
+last-updated: 2026-06-08 (virtio code extracted into go-virtio org)
 ---
 
 # TamaGo UEFI Phase 2 — OCI pre-boot loader (shape A)
@@ -968,6 +968,37 @@ acceptance MET 2026-06-07 with the R-M2b mask widening (FEATURES_OK
 sticks, OpenVirtioNet returns success, MAC reads cleanly); full VZ
 ARP-echo acceptance DEFERRED to R-M2c (TX descriptor publish on the
 used ring). riscv64 acceptance deferred to M2.1's SNP rail.
+
+**Virtio code extraction (2026-06-08).** The transport-agnostic virtio
+infrastructure (PCI capability walker, modern config + register
+layout, split-virtqueue impl) and the spec-level virtio-net driver have
+been extracted from `cloud-boot/tamago-uefi/uefiboard/` into a new
+`go-virtio` GitHub org:
+
+  - [`github.com/go-virtio/common`](https://github.com/go-virtio/common)
+    — transport-agnostic virtio infrastructure (PCI cap walker, modern
+    `ModernConfig` + register accessors, split-virtqueue impl,
+    `Transport` / `PCIConfigReader` / `BARMemoryAccessor` /
+    `PageAllocator` interfaces). Mirrors Linux's `<linux/virtio.h>` +
+    `virtio_ring.h` shared infrastructure.
+  - [`github.com/go-virtio/net`](https://github.com/go-virtio/net) —
+    pure-Go virtio-net driver. Imports `go-virtio/common`. The Virtio
+    1.1 §3.1.1 init sequence, the per-frame header layout, the rxq /
+    txq state machine, and the R-M2b MTU acceptance fix all live here.
+  - [`github.com/go-virtio/blk`](https://github.com/go-virtio/blk) —
+    placeholder for a future pure-Go virtio-blk driver (cloud-boot
+    currently uses UEFI's `EFI_BLOCK_IO_PROTOCOL` for the pre-EBS
+    phase; the placeholder makes the `go-virtio` org symmetric with
+    Linux's `<linux/virtio_net.h>` / `<linux/virtio_blk.h>` split and
+    documents the design slot for when a concrete caller appears).
+
+`uefiboard/` keeps the UEFI transport adapter (`virtio_uefi_transport.go`
+implements `common.Transport` via `EFI_PCI_IO_PROTOCOL` +
+`gBS->AllocatePages`) plus a thin bridge file (`virtio_uefi_bridge.go`
++ `virtio_net_uefi.go`) that preserves the existing
+`uefiboard.OpenVirtioNet` / `uefiboard.VirtioNet` API surface so M2 and
+M3-minimal probes compile unchanged. M2's R-M2b live-validated MTU
+feature bit is preserved verbatim in `go-virtio/net.AcceptedFeatures`.
 
 ### M2.1 — SNP wrapper (Path Y' rail, pending)
 
@@ -2088,3 +2119,25 @@ Per milestone, revisit at the start of the M-N agent run.
   validation step. The QEMU 4-arch PASS cells are unaffected
   (M2-B binary uses the same pre-EBS pipeline; only post-EBS
   behaviour differs from M2).
+- **2026-06-08** (virtio code extraction): the transport-agnostic
+  virtio infrastructure and the spec-level virtio-net driver have
+  been split out of `cloud-boot/tamago-uefi/uefiboard/` into the new
+  `go-virtio` GitHub org. Three repos:
+  [`go-virtio/common`](https://github.com/go-virtio/common) holds the
+  PCI capability walker, the modern `ModernConfig` register layout, the
+  split-virtqueue impl, and three `Transport` interfaces
+  (`PCIConfigReader`, `BARMemoryAccessor`, `PageAllocator`);
+  [`go-virtio/net`](https://github.com/go-virtio/net) holds the
+  pure-Go virtio-net driver (`OpenVirtioNet(transport)`, init sequence
+  per Virtio 1.1 §3.1.1, R-M2b MTU mask preserved);
+  [`go-virtio/blk`](https://github.com/go-virtio/blk) is a placeholder
+  for a future pure-Go virtio-blk driver. `uefiboard/` retains the
+  UEFI transport adapter (`virtio_uefi_transport.go` — implements
+  `common.Transport` via `EFI_PCI_IO_PROTOCOL.Pci.Read/Mem.Read/Write`
+  + `gBS->AllocatePages`) plus a thin bridge layer
+  (`virtio_uefi_bridge.go` + `virtio_net_uefi.go`) so existing
+  consumers (`phase2_virtionet_tx.go`, `phase2_pcienum.go`,
+  `uefiboard/ministack/link_tamago.go`) compile unchanged. Banner
+  rodata + ministack unit tests PASS on all 4 arches;
+  `task virtionet:all` + `task ministack:all` build clean.
+  Per-repo coverage: `common` 96.3 %, `net` 81.1 %, `blk` placeholder.
