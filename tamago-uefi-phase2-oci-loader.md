@@ -205,8 +205,10 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
 | M6.2        | queued                              | real PE compressor: `go-compressions/*` + `go-coff/efipack`|
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
+| **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
+| M7.1b       | queued                              | cosign signature verification on manifest                  |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
-| M8.1        | deferred behind M6.2 + M7.1         | real Linux EFI-stub handover (post-EBS)                    |
+| M8.1        | deferred behind M6.2 + M7.1b        | real Linux EFI-stub handover (post-EBS)                    |
 
 ### M0 — Probe + type surface (done)
 
@@ -1755,7 +1757,75 @@ streaming OCI fetch is the M8.1 follow-up, which inherits both
 the M6.1 (amd64 OVMF PE>4MiB) and M7.1 (streaming blob fetch)
 prerequisites.
 
-### M8.1 — Linux EFI-stub handover (deferred behind M6.1 + M7.1)
+### M7.1a — streaming OCI blob fetch (SHIPPED 2026-06-09)
+
+**Status:** STREAMING SHIPPED — `HTTPGetStream` + `HTTPSGetStream` +
+`oci.FetchBlobStream` live on `main` as of 2026-06-09; the 1 MiB
+`HTTPMaxResponseBytes` cap that the buffered M7 path enforces is
+lifted end-to-end. M7.1b (cosign signature verification) is the
+remaining half of M7.1.
+
+**Deliverables (shipped):**
+
+- `uefiboard/ministack/http.go` — `HTTPGetStream(url, dst io.Writer,
+  opts) (status, written, contentType, err)` + extended
+  `HTTPGetStreamHeaders` (full lowercase-keyed headers map for
+  `Location` chasing). The buffered `HTTPGet` is unchanged and the
+  1 MiB cap remains on the buffered path.
+- `uefiboard/ministack/https.go` — `HTTPSGetStream` /
+  `HTTPSGetStreamHeaders` siblings layered on the M6 `DialTLS`.
+- `uefiboard/ministack/oci/fetch.go` — `FetchBlobStream(desc, dst)`
+  tees through `sha256.New()` via `io.MultiWriter` and verifies the
+  computed digest against the descriptor on EOF; returns
+  `ErrDigestMismatch` on mismatch. Follows up to 2 hops of 3xx
+  `Location` redirects (S3 / CDN). Requires the configured
+  `Transport` to also implement the new `StreamTransport`
+  interface — otherwise `ErrTransportNotStreaming`.
+- `phase2_oci_stream_fetch.go` + `_stub.go` — gated probe
+  (`-tags phase2_oci_stream_fetch`). DHCP → CA roots → walk the
+  alpine index → pick the per-arch manifest → stream the BIGGEST
+  layer into `io.Discard` with on-the-fly SHA-256.
+- Per-arch Taskfile targets `ocistream:{elf,efi,live}:<arch>` +
+  `ocistream:all`, mirroring the `oci:*` shape.
+- `internal/liveocistream/run.sh` — live runner. amd64 prints a
+  clear "skipped pending M6.2" line and exits 0 (build is still
+  exercised by `ocistream:efi:amd64`); arm64 / riscv64 / loong64
+  run live under QEMU+EDK2 with a 240 s timeout (the alpine blob
+  is multi-MiB over user-mode NAT).
+
+**Live results (ghcr.io/linuxcontainers/alpine:latest):**
+
+| arch    | smoke-arch | layer digest (first 16 hex)         | bytes streamed | SHA-256 |
+|---------|------------|-------------------------------------|----------------|---------|
+| arm64   | arm64      | sha256:94e9d8af22013aab...          | 4,091,165      | OK      |
+| riscv64 | amd64 (fb) | sha256:0a9a5dfd008f05eb...          | 3,626,897      | OK      |
+| loong64 | amd64 (fb) | sha256:0a9a5dfd008f05eb...          | 3,626,897      | OK      |
+
+(loong64 + riscv64 fall back to amd64 since linuxcontainers/alpine
+does not ship per-arch manifests for those two; the streaming code
+path itself is unchanged.)
+
+**Host-side coverage** (M7.1a addition):
+
+- `uefiboard/ministack` package coverage 88.0% (up from previous;
+  streaming path covered by `http_stream_test.go`: chunked,
+  chunked-with-extension, chunked-truncated, chunked-bad-size,
+  identity, content-length, content-length-truncated, bad
+  status/header lines, redirect-drains-body, lineReader long-line +
+  over-cap).
+- `uefiboard/ministack/oci` package coverage 94.2%. Streaming-fetch
+  cases: happy path, digest mismatch, size mismatch, redirect
+  chain, redirect with empty Location, non-200, transport error,
+  bad descriptor digest, transport without `StreamTransport`,
+  too-many-redirects.
+
+**M7.1b (cosign) remains.** Outline (no commits yet): bring a
+pure-Go cosign verifier online against the embedded TUF root,
+verify the manifest digest's signature before any blob descend.
+ECDSA P-256 + Ed25519 keys only; transparency-log inclusion proof
+is the OCI signature scheme, not signed-text.
+
+### M8.1 — Linux EFI-stub handover (deferred behind M6.1 + M7.1b)
 
 **Deliverable.** Memory map → ExitBootServices → jump to the loaded
 Linux kernel, per-arch.
