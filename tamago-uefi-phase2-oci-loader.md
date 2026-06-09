@@ -1888,13 +1888,42 @@ EFI is ~3.9 MiB on amd64 so the marginal cost of oras-go on top of
 what we already link is ~2 MiB, not the 4-5 MiB a pure new addition
 would have implied.
 
-**Functional parity verdict (host build + tamago build clean on
-all four arches):** TBD — pending live PASS confirmation on the
-arm64 / riscv64 / loong64 runners. The smoke probe is intentionally
-narrower than M7 (manifest fetch only; M7 walks index → manifest →
-config → layer) to minimise the test surface; expanding to a
-full-walk `oras.Copy` against a memory store is a follow-up if
-parity needs to be tightened.
+**Functional parity verdict:** **FAIL on live arm64** (2026-06-09).
+The probe progresses through DHCP, embedded-roots load, gateway
+pre-ping, `orasoci.Repository` construction, and reaches the line
+`Resolve(ghcr.io/linuxcontainers/alpine:latest) via oras-go`, then
+**hangs indefinitely** until the QEMU 240 s watchdog kills it.
+
+Most likely root cause: `net/http.Client.Do` (which `oras.Resolve`
+ultimately calls) spawns internal goroutines (the cancellation
+watcher, the persist-conn manager, etc.) that under TamaGo+UEFI
+NEVER get CPU because the runtime has no async preemption
+(the same finding that drove the inline-RX-pump pattern in M3 /
+M4). Even though our custom `Transport.RoundTrip` returns
+correctly, the surrounding `http.Client` wrapper waits for a
+ctx-listening goroutine that never runs. ministack's `TCP4Conn.Read`
+DOES drive RX inline (verified in tcp4.go:539), so this is not a
+ministack bug — it's a net/http dependency on Go's scheduler.
+
+**Mitigations for the hang** (none implemented in M7.alt POC):
+
+1. Use a much lower-level oras-go entry point that bypasses
+   `http.Client` and only calls our `Transport.RoundTrip` directly.
+   Possible via `oras.land/oras-go/v2/registry/remote.Client`
+   interface, which lets us substitute the wrapper around
+   `RoundTripper`. Worth trying — could be a 50-LOC fix.
+2. Build a TamaGo-friendly minimal `http.Client` lookalike that
+   doesn't spawn goroutines. Discards the bulk of `net/http`,
+   keeps `RoundTripper` plumbing.
+3. Wait for TamaGo runtime to support timer-driven preemption
+   (large engineering project, not on the roadmap).
+
+**Implication for the post-M6.2 decision:** even with the size
+penalty halved by the PE compressor, the oras-go path needs
+runtime work before it can ship. The +2 MiB cost was the easy
+question; this hang is the hard one. **The hand-rolled M7 client
+stays the default**; we revisit if/when a low-overhead bypass
+(mitigation 1) proves out.
 
 **RoundTripper line-count + complexity:**
 
@@ -1924,10 +1953,18 @@ circuits before the default transport's dialer fires.
   TCP4Conn type can plug into; deferred to the live runner). Gate
   is documented at 60% pending fake-Stack infrastructure work.
 
-**Decision rule (post-M6.2):** if the PE compressor halves the
-binary penalty (so the delta drops from ~2 MiB to ~1 MiB), the
-oras-go path becomes preferable. If not, the hand-rolled M7 client
-stays. TBD line — user to fill in.
+**Decision rule (revised 2026-06-09 post-live-FAIL):** the +2 MiB
+size penalty was the easy gate; the goroutine-scheduler hang in
+`net/http.Client.Do` is the hard one. M7.alt **stays as a
+reference POC**, not a candidate replacement, until at least one
+of:
+
+- A low-level `oras-go` bypass (mitigation 1 above) is
+  prototyped and proven to terminate cleanly under TamaGo+UEFI.
+- TamaGo runtime gains async preemption (no ETA).
+
+The hand-rolled M7 client (M7 + M7.1a streaming + M7.1b cosign
+in-flight) stays the production code path.
 
 ### M8.1 — Linux EFI-stub handover (deferred behind M6.1 + M7.1b)
 
