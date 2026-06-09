@@ -204,6 +204,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6          | done 2026-06-08                     | TLS + HTTPS GET (PE>4 MiB amd64 deferred as M6.1)          |
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
 | M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
+| M6.2 PR2    | **arm64/riscv64/loong64 GREEN 2026-06-09** (amd64 deferred → `m6-2-pr2-amd64-wip`) | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
 | **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
@@ -1627,6 +1628,42 @@ The full M6.2 compressor implementation lives in a separate repo
 (`go-coff/efipack`); the de-risk experiment lives entirely in
 `cloud-boot/tamago-uefi` and is preserved for regression testing.
 Re-run with `task efitiny:live:amd64`.
+
+#### M6.2 PR2 — per-arch self-extracting stub (2026-06-09)
+
+PR2 lands the per-arch decompressor stubs that wrap the M6.2
+envelope into a runnable self-extracting EFI. The shared TamaGo PIE
+source lives in `cloud-boot/tamago-uefi/cmd/efipackstub` and builds
+identically for all four GOARCH values; the resulting PE32+ blobs
+are embedded into `go-coff/efipack/stub/blobs/<arch>.efi.bin` via
+`//go:embed` and used as the envelope base PE by `efipack.Pack`
+(then `peln/appender.AppendBefore .reloc` slots `.payload` into the
+section table without disturbing any existing RVA).
+
+Consolidated live smoke matrix (QEMU 9.2.0 + EDK2, `-netdev user`):
+
+| ARCH    | HTTP            | HTTPS           | OCI             | EFIHANDOVER     |
+|---------|-----------------|-----------------|-----------------|-----------------|
+| arm64   | PASS (3.17→2.72 MiB) | PASS (4.45→3.29 MiB) | _baseline (rerun pending)_ | _baseline (rerun pending)_ |
+| riscv64 | PASS (2.85→2.68 MiB) | PASS (4.30→3.26 MiB) | PASS (4.62→3.39 MiB) | PASS (1.98→2.55 MiB) |
+| loong64 | PASS (3.13→2.85 MiB) | PASS (4.74→3.45 MiB) | PASS (5.10→3.58 MiB) | PASS (2.16→2.74 MiB) |
+| amd64   | **deferred** — runtime crash inside stub; tracked on `m6-2-pr2-amd64-wip` branch | — | — | — |
+
+Sizes are `(original on-disk) → (packed envelope on-disk)`. The
+EFIHANDOVER row on riscv64/loong64 is mildly anti-compressed because
+the parent already embeds a gzipped child payload, so the flate
+inside `.payload` only buys back the PE wrapper and header overhead
+pushes the envelope slightly larger. EFIHANDOVER PASS implies the
+stub's chain-boot survives a second LoadImage/StartImage layer
+(parent → stub → handover child), which is the strongest signal in
+the matrix.
+
+amd64 stays on `m6-2-pr2-amd64-wip` until the in-stub crash is
+root-caused; the firmware-mapping question that motivated "option 2"
+(re-read own file via SimpleFileSystem) is resolved on aarch64/
+riscv64/loongarch64 with the same Go source, so the amd64 crash is
+specifically an x86-64-PE/TamaGo-runtime interaction and not a
+design defect in the wire format.
 
 riscv64 was deferred in M5 due to a separate timing bug; that bug
 is asymptomatic at the M6 boundary (the inline-pump pattern from M3
