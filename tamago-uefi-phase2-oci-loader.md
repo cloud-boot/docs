@@ -209,7 +209,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.2 PR4    | **SHIPPED 2026-06-09 (host-side)**  | LZFSE codec wired in `efipack v0.2.0` + `pectl v0.3.0`; runtime stubs still flate-only (deferred) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
-| **M7.1b**   | **done 2026-06-09 (cosign SHIPPED + real-image verified)** | **keyed cosign ECDSA-P256 signature verification (self-test + arm64 live real-image PASS against ttl.sh)** |
+| **M7.1b**   | **done 2026-06-09 (cosign v2 + v3 SHIPPED, real-image verified)** | **keyed cosign ECDSA-P256 verify: v2 layer-annotation + v3 sigstore-bundle (messageSignature & dsseEnvelope); host coverage 96.1%; live wire-format proof against cosign-v3-signed ttl.sh image** |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
@@ -2191,6 +2191,92 @@ the cosign CLI default (`cosign generate-key-pair` emits P-256), (b)
 our images will be signed by tooling that defaults to the same, and
 (c) keeping the cipher set minimal shrinks the failure surface. Adding
 Ed25519 is a ~20-line follow-up if a use case appears.
+
+#### cosign v3 sigstore-bundle format (SHIPPED 2026-06-09)
+
+cosign v3 replaced the layer-annotation simple-signing wire format
+with a sigstore protobuf bundle (JSON-encoded). The verifier now
+parses BOTH formats; format is detected per layer of the `.sig`
+manifest:
+
+- legacy v2:  layer `mediaType=application/vnd.dev.cosign.simplesigning.v1+json`,
+  base64 signature in the `dev.cosignproject.cosign/signature` annotation.
+- cosign v3 — `messageSignature` shape:
+  layer `mediaType=application/vnd.dev.sigstore.bundle.v0.{2,3}+json`,
+  layer BODY is a JSON bundle with `messageSignature.signature` (raw
+  ECDSA) + `messageSignature.messageDigest.digest` (base64 SHA-256).
+  Used by `cosign sign-blob` and earlier v3 `--key`-mode signing.
+- cosign v3 — `dsseEnvelope` shape (the default that cosign v3 emits
+  today when using `--registry-referrers-mode=oci-1-1`): same layer
+  media-type, layer BODY is a JSON bundle with `dsseEnvelope.payload`
+  (base64 in-toto Statement) + `dsseEnvelope.signatures[0].sig` (raw
+  ECDSA over `sha256(DSSE-PAE("application/vnd.in-toto+json", payload))`).
+  Subject digest in the in-toto Statement MUST equal the manifest
+  digest we are verifying.
+
+The v3 paths require fetching the layer body (the bundle JSON); the
+legacy path stayed annotation-only. Bundle-substitution guard:
+`messageSignature.messageDigest` is cross-checked against
+`sha256(CanonicalPayload(ref, manifestDigest))` before ECDSA verify;
+the DSSE path cross-checks the in-toto subject sha256 against the
+manifest digest. Out-of-scope: bundle's own `verificationMaterial`
+(`publicKey.hint`, `tlogEntries`) — trust root is our pinned pubkey.
+
+Supported media-types: `vnd.dev.sigstore.bundle.v0.2+json`,
+`vnd.dev.sigstore.bundle.v0.3+json`.
+
+Implementation: `uefiboard/ministack/oci/cosign.go` adds
+`parseSigstoreBundle`, `parseSigstoreBundleMessageSignature`,
+`parseSigstoreBundleDSSE`, `dssePAE`, `collectSignatures`, and a
+new internal `parsedSignature` discriminated union. Pure stdlib
+(`encoding/json`, no Protobuf dependency — JSON is the canonical
+wire format for OCI distribution). New error types:
+`ErrCosignBundleMalformed`, `ErrCosignBundleAlgo`.
+
+Mixed `.sig` manifests (legacy layer + v3 bundle layer) are handled
+correctly in any layer ordering — the verifier returns nil on the
+first signature that verifies.
+
+Tests added in `uefiboard/ministack/oci/cosign_test.go`:
+
+| Test                                              | Asserts                                                       |
+|---------------------------------------------------|---------------------------------------------------------------|
+| `TestParseSigstoreBundleRoundTrip`                | Synthesised v3 bundle parses + signature verifies             |
+| `TestParseSigstoreBundleRejects{Empty,BadJSON,…}` | Negative paths for every malformed-bundle branch              |
+| `TestVerifyV3BundleHappyPath`                     | End-to-end v3 messageSignature verify via mock Registry       |
+| `TestVerifyV3BundleV02MediaType`                  | v0.2 media-type accepted                                      |
+| `TestVerifyV3BundleWrongMessageDigest`            | Bundle-substitution guard rejects mismatched messageDigest    |
+| `TestVerifyV3Bundle{Tampered,Malformed,Fetch500}` | Negative paths                                                |
+| `TestVerifyV3DSSEHappyPath`                       | End-to-end DSSE-envelope verify                               |
+| `TestVerifyV3DSSEWrongSubject`                    | Subject-mismatch rejection                                    |
+| `TestVerifyV3DSSE{Tampered,PayloadTypeMutated}`   | DSSE PAE binding holds                                        |
+| `TestParseSigstoreBundleDSSERejectsMissing`       | 9-case table for missing/malformed DSSE subtree fields        |
+| `TestDSSEPAE`                                     | DSSE-PAE wire encoding matches the secure-systems-lab example |
+| `TestVerifyMixedLegacyFirstOK / BundleFirstOK`    | Mixed legacy + v3 in either order verifies                    |
+| `TestLiveCosignV3DSSEBundleParseAndVerify`        | Real ttl.sh-served cosign-v3 wire bytes verify end-to-end     |
+
+Host coverage for the cosign package: **96.1 %** (cosign.go
+functions all at 100 % except `Verify` at 97.6 % — one defensive
+branch unreachable from outside).
+
+**Live v3 wire-format probe (2026-06-09):** captured the actual
+JSON bundle blob emitted by `cosign v3.1.1 sign --key ... --use-signing-config=false --tlog-upload=false --registry-referrers-mode=oci-1-1`
+against `ttl.sh/cloudboot-m71b-v3-1781036486:24h`, embedded the
+667-byte body + its ECDSA P-256 pubkey + the signed manifest digest
+into `TestLiveCosignV3DSSEBundleParseAndVerify`, which parses the
+bundle, checks the in-toto subject equals the manifest digest, and
+ECDSA-verifies `sha256(DSSE-PAE(...))` against the embedded pubkey.
+PASS — the verifier accepts wire bytes a real cosign v3 signer
+produced.
+
+A full end-to-end on-target live run against a cosign-v3-signed
+image is queued for when we adapt the probe constants — the
+`internal/livecosign/run-real-image.sh` helper currently pins
+cosign v2; a `run-real-image-v3.sh` follow-up (or a `-v3` flag)
+will reproduce the same wire-bytes exercise against an
+on-target QEMU+EDK2 boot using the cosign-v3 wire format. The
+parser is already proven against real v3 bytes; the on-target
+run is mechanically the same as the v2 path.
 
 ### M7.alt — oras.land/oras-go/v2 evaluation (POC SHIPPED 2026-06-09)
 
