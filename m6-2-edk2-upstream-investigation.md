@@ -1,6 +1,6 @@
 ---
 title: M6.2 amd64 firmware bug — EDK2 upstream investigation
-status: patched OVMF integrated 2026-06-09; M8.0 chainedhello + EFIHANDOVER unblocked, HTTPS / OCI hit a separate downstream #PF
+status: patched OVMF integrated 2026-06-09; M8.0 chainedhello + EFIHANDOVER unblocked; HTTPS / OCI #PF root-caused (R-amd64a § 11); AllocatePages cpuinit rewrite attempted (R-amd64b § 12) hit rt0 secondary regression and is staged on m6-2-pr2-amd64-wip-r-amd64b for R-amd64c
 last-updated: 2026-06-09
 ---
 
@@ -659,4 +659,189 @@ regression couldn't be unstuck inside the 90-minute hard cap.
 - This § 11 documents the root cause + the partial-fix attempt +
   the concrete next-sprint plan so the next agent can pick up
   without re-deriving the trace.
+
+## 12. R-amd64b — AllocatePages rewrite attempted, rt0 regression reproduced (2026-06-09)
+
+### 12.1 What was tried
+
+Implemented the R-amd64a § 11.6 plan as a drop-in:
+
+- `uefiboard/cpuinit_amd64.s` rewritten to call
+  `gBS->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EfiLoaderData,
+  RamSize>>12, &heapBase)` with MS x64 ABI (RCX/RDX/R8/R9 args,
+  32-byte shadow space, 16-byte SP alignment via `ANDQ $~15, SP`
+  with original SP stashed in R13). On success, anchors
+  `goos.RamStart` + `goos.Bloc` to the returned base, then
+  `REP STOSB`-zeroes the **entire** 128 MiB allocation (R-amd64a
+  speculated 64 bytes was insufficient; the rewrite uses the
+  whole region to neutralise istack guard / type-bitmap / persistent-
+  arena reads). On AllocatePages failure, halt forever (`HLT; JMP`).
+- `uefiboard/board_amd64.go` drops `ramSize` from `0x2c000000`
+  (704 MiB) to `0x08000000` (128 MiB), matching arm64 / riscv64 /
+  loong64.
+- `uefiboard/eficall_amd64.s` removes the pre-CALL
+  `SP = RamStart + RamSize` stack switch (mirrors arm64 / riscv64 /
+  loong64 thunks; stays on the Go goroutine stack across firmware
+  calls).
+- `uefiboard/board.go` updates docstrings to reflect the
+  AllocatePages model.
+
+All four files compile cleanly under the TamaGo amd64 toolchain.
+Disassembly inspection confirms the linker resolves
+`runtime∕goos·RamSize`, `runtime∕goos·Bloc`, `runtime∕goos·RamStart`,
+`runtime∕goos·RamStackOffset` correctly and the AllocatePages page
+count is `RamSize >> 12 = 0x8000` pages.
+
+### 12.2 Test result
+
+Full amd64 smoke matrix against patched OVMF
+(`edk2-stable202605`):
+
+| ROW         | MODE     | R-amd64a baseline | R-amd64b      |
+|-------------|----------|-------------------|---------------|
+| HTTP        | original | **PASS**          | FAIL #GP      |
+| HTTP        | packed   | FAIL #PF*         | FAIL #GP      |
+| HTTPS       | original | FAIL #PF*         | FAIL #GP      |
+| HTTPS       | packed   | FAIL #PF*         | FAIL #GP      |
+| OCI         | original | FAIL #PF*         | FAIL #GP      |
+| OCI         | packed   | FAIL #PF*         | FAIL #GP      |
+| EFIHANDOVER | original | **PASS**          | FAIL #GP      |
+| EFIHANDOVER | packed   | FAIL #PF*         | FAIL #GP      |
+
+R-amd64b is a **net regression** from R-amd64a (lost HTTP +
+EFIHANDOVER original cells). The new failure mode is uniform
+across all 8 cells:
+
+```text
+!!!! X64 Exception Type - 0D(#GP - General Protection) !!!!
+RIP  - 55415641E5894855, CS  - 0000000000000038
+RSP  - 000000007FE3D968 (or in our heap, varies by image size)
+R14  - 0000000000000000   (set explicitly by cpuinit; see § 12.3)
+CR3  - 000000007FC01000   (firmware's PML4, unchanged)
+```
+
+`RIP = 0x55415641_E5894855` is **non-canonical** (bits 63..47 not
+sign-extended) and decodes byte-wise to
+`55 48 89 E5 41 56 41 55` =
+`push rbp; mov rbp,rsp; push r14; push r13` — Go's standard
+frame-pointer prologue. So somewhere in the bring-up, a `RET`
+pops these bytes off the stack as a return address. Exactly the
+R-amd64a § 11.4 secondary regression.
+
+### 12.3 Ruled out
+
+- **R14 = arbitrary firmware leftover** (Go's ABIInternal uses
+  R14 = g; bare-metal init.s relies on R14=0 at PE entry, address
+  0x10 being mapped, so `runtime.check`'s `CMPQ SP, 0x10(R14)`
+  split-stack load returns a tiny value and never faults). Added
+  `XORQ R14, R14` to cpuinit's entry; **same failure**.
+
+- **Uninitialised stack memory** (R-amd64a's primary hypothesis;
+  argc/argv at 24(SP) / 32(SP) etc.). The `REP STOSB` zero of
+  the full 128 MiB allocation runs before SP is set; **same
+  failure**.
+
+- **MS x64 alignment violation at the AllocatePages CALL site**
+  (Go's caller SP is 8-mod-16; firmware expects 16-mod-16 at
+  call instruction so callee sees 8-mod-16 after RIP push).
+  Added `MOVQ SP, R13; SUBQ $32, SP; ANDQ $~15, SP` /
+  `CALL (R11); MOVQ R13, SP`; **same failure**.
+
+- **AllocatePages returning non-success and the failure path
+  running** — cpuinit's `JNZ allocFail` would `HLT` (halt CPU);
+  the actual symptom is a #GP after rt0 has started, not a hang.
+
+### 12.4 Most plausible remaining hypotheses
+
+1. **`firstmoduledata` GC bitmap pointers** are computed off
+   `runtime.text` / `runtime.data`. Under bare-metal `RamStart =
+   text - 64 KiB`, the heap (Bloc upward from RamStart) ENGULFS
+   the .text/.data of the binary — the GC's
+   "is this pointer in heap" check uses Bloc, blocMax, and
+   `firstmoduledata.{noptrdata, data, bss, noptrbss}` ranges.
+   Under R-amd64b, `RamStart = Bloc = heapBase` is **outside**
+   the binary's loaded address range — `firstmoduledata.end ≠
+   blocMax`. `osinit` skips its `initBloc` (since `goos.Bloc != 0`)
+   but `mallocinit` may still read GC bitmaps anchored at the
+   wrong base, producing pointer values that look like Go
+   function-prologue bytes when interpreted as code addresses.
+   Repro idea: instrument `mallocinit` / `gcBitsArenas` to print
+   the bitmap base + a few bytes on entry, see if the bytes match
+   the post-fault RIP value.
+
+2. **Stack pointer ALIGNMENT into rt0_amd64_tamago.** After
+   `SP = R12 + RamSize - 0x100000`, SP is `heapBase + 0x07F00000`.
+   `heapBase` is page-aligned (4 KiB) per AllocatePages contract,
+   so SP is 0-mod-4096 — but Go's ABIInternal requires SP +
+   `frame_size` to land on a specific alignment (typically
+   16-byte). The bare-metal `RamStart = text - 64 KiB` happens
+   to be 0-mod-64KiB → 0-mod-16 too, but offset-by-the-jmp's
+   8-byte push? Actually rt0 is `JMP` (no push). Hmm. Worth
+   verifying by trying `SUBQ $8, SP` between the SP setup and
+   the JMP — if SP-alignment is the cause, even a single 8-byte
+   shift will change which cells PASS vs FAIL.
+
+3. **MTRRs or PAT bits on the AllocatePages region.** EfiLoaderData
+   is normally WriteBack-cacheable, but if OVMF mapped our chunk
+   as WriteCombining or Uncacheable, RMW instructions on it
+   (the runtime uses LOCK CMPXCHGL in atomic.Cas — visible in
+   the `runtime.check` disassembly we already collected) would
+   misbehave or fault. Verify by reading the page's PAT/MTRR
+   via RDMSR(0x277) and the firmware's GCD memory map.
+
+### 12.5 What shipped this sprint
+
+- **No code changes shipped to main.** The R-amd64b experimental
+  diff lives on the `m6-2-pr2-amd64-wip-r-amd64b` branch (commit
+  `9cb9e0b`, "R-amd64b WIP: amd64 cpuinit AllocatePages + 128
+  MiB heap (rt0 zero-init regression)") for R-amd64c to pick up.
+- The OLD `m6-2-pr2-amd64-wip` branch (the BlkRingBuffer-
+  instrumented stub experiment that predates the R-amd64a
+  investigation) is intentionally **left intact** — it's a
+  different debug avenue.
+- Baseline on main is unchanged: M5 HTTP + M8.0 EFIHANDOVER
+  continue to PASS, M6 HTTPS / M7 OCI / packed-variants
+  continue to fail the way R-amd64a documented in § 11.
+
+### 12.6 Concrete next-sprint plan (R-amd64c)
+
+1. **Resume from `m6-2-pr2-amd64-wip-r-amd64b` branch.** Tree
+   already has the AllocatePages cpuinit + 128 MiB board +
+   no-stack-switch eficall in place. Don't re-derive.
+
+2. **Add `ConOut` debug prints from cpuinit** between
+   AllocatePages return and JMP rt0:
+   - one byte ('A') after `JNZ allocFail` succeeds → confirms
+     AllocatePages OK;
+   - one byte ('B') after the REP STOSB → confirms memset
+     completes (rules out memset trampling unmapped pages);
+   - one byte ('C') just before the JMP → confirms SP arithmetic
+     completes;
+   - **if 'A' shows but not 'B' or 'C'**: the memset is faulting
+     because AllocatePages returned a region we can't write —
+     check the GCD memory map / PAT;
+   - **if all three show but the rt0 #GP still fires**: the bug
+     is inside `runtime.rt0_amd64_tamago` (most likely §12.4
+     hypothesis 1 or 2).
+
+3. **Try the SP-alignment shift in (2.) — `SUBQ $8, SP` between
+   SP setup and JMP.** Cheapest test for hypothesis 2.
+
+4. **If a rt0 patch is needed**, save to
+   `cloud-boot/docs/tamago-pie-amd64-rt0-zeroinit.patch`,
+   apply locally in `~/Documents/VCS/GIT/localhost/tamago-pie/`,
+   rebuild TamaGo, re-test. Do NOT push to tamago-pie (forked
+   upstream).
+
+5. **Gate the merge of `m6-2-pr2-amd64-wip-r-amd64b` to main on
+   a fully-green M6 + M7 + M8.0 + M8.2 packed amd64.**
+
+### 12.7 Time accounting
+
+Sprint cap was 120 min. Spent: ~110 min on (build, run, debug
+× 3 hypotheses, document). Per the task brief's "if you blow the
+budget on the rt0 fix, ship the cpuinit + eficall changes WITH a
+clear 'rt0 zero-init regression remaining' + push WIP + propose
+next investigation" rule, that is exactly what this section
+documents.
 
