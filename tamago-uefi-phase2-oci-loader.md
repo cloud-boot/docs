@@ -202,9 +202,11 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M4          | done 2026-06-08                     | DHCPv4 client                                              |
 | M5          | done 2026-06-08                     | DNS + HTTP GET                                             |
 | M6          | done 2026-06-08                     | TLS + HTTPS GET (PE>4 MiB amd64 deferred as M6.1)          |
+| M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
+| M6.2        | queued                              | real PE compressor: `go-compressions/*` + `go-coff/efipack`|
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
-| M8.1        | deferred behind M6.1 + M7.1         | real Linux EFI-stub handover (post-EBS)                    |
+| M8.1        | deferred behind M6.2 + M7.1         | real Linux EFI-stub handover (post-EBS)                    |
 
 ### M0 — Probe + type surface (done)
 
@@ -1428,25 +1430,81 @@ Per-arch live results (QEMU+EDK2 user-mode networking,
 **amd64 deferred to M6.1.** The amd64 EDK2 OVMF firmware (the
 `edk2-x86_64-code.fd` from `qemu.org/v9.2.0/share/qemu`) crashes
 with a `#GP` exception inside `CpuPageTableLib` (RIP in
-CpuDxe.dll +0x1110C) when `LoadImage` runs on the 4.7 MiB PE32+ we
+CpuDxe.dll +0x110C) when `LoadImage` runs on the 4.7 MiB PE32+ we
 ship for M6. The M5 PE32+ (3.2 MiB) loads fine on the same
 firmware. The probe binary itself is byte-identical across arches
 modulo arch-specific text — the same Go code that boots
 arm64/riscv64/loong64 fails on amd64 OVMF. This is a firmware-side
 load-image bug, not a TamaGo or cloud-boot defect; the M5 amd64
 HTTP probe still PASSes against the live internet on the same
-firmware. Mitigations to investigate in M6.1:
+firmware.
 
-1. Build OVMF locally from a newer EDK2 master (the bundled .fd
-   carries the upstream Linux distro build host's path baked in
-   and is several stable releases old).
-2. Try the qemu-9 hardware-RAM path (`-M q35,smm=off` +
-   `-machine pflash-no-attestation`).
-3. Shrink the binary via `-ldflags="-s -w"` + manual section
-   pruning (likely takes ~4.7 MiB → ~3.0 MiB, possibly under
-   whatever EDK2 threshold the bug crosses).
-4. Bypass the EDK2 shell — boot directly via `BdsDxe` instead of
-   `startup.nsh`, which would skip the path that crashes.
+**M6.1 investigation (2026-06-09).** Walked the four candidate
+mitigations. Findings:
+
+1. *Newer OVMF.* pkgx qemu 9.2.0 and homebrew qemu 10.2.2 ship the
+   **same** `edk2-x86_64-code.fd` byte-for-byte (MD5
+   `661c68c8b0a2ed59d5e4a13563cd6e13`). No newer EDK2 binary
+   is reachable without building from source.
+2. *Symbol stripping.* Adding `-ldflags="-s -w"` shrinks the ELF
+   (~4.18 MiB → ~3.43 MiB on M8.0 amd64) but produces a
+   **byte-identical PE32+** through pectl (3,440,128 → 3,440,128) —
+   pectl already discards the symbol table + DWARF, so `-s -w` is a
+   no-op on the output we care about.
+3. *PE size threshold misread.* The "anything over 4 MiB fails"
+   framing from M6 was incorrect. M5 HTTP amd64 (3,173,888 bytes)
+   PASSes; the original M8.0 amd64 parent at 3,440,128 was reported
+   FAIL but it was actually the M8.0 runner missing the dummy
+   `-netdev user + virtio-net-pci` device (which all M5/M6/M7
+   amd64 runners carry as a side-effect of their probes). Without a
+   netdev-backed PCI device, EDK2 stable202408's BDS on q35 skips
+   the ESP entirely and falls straight to PXE; that masquerades as
+   a PE-load failure but isn't one.
+4. *Actual M6.1 fault, now precisely localised.* After (a) gzipping
+   the embedded chained payload in M8.0 to bring the parent under
+   2.5 MiB, and (b) adding the dummy virtio-net device to the M8.0
+   amd64 runner, the parent loads cleanly on amd64 OVMF and the M8.0
+   probe runs end-to-end up to `gBS->StartImage` on the
+   1.7 MiB chained PE32+. That call faults with `#GP` at RIP
+   `0x7EF6710C` (CpuDxe.dll +0x110C, ImageBase 0x7EF56000) —
+   **identical** signature to the M6 HTTPS amd64 fault. So the M6.1
+   bug is not about parent PE size per se; it's about
+   `LoadImage+StartImage` of *any* sufficiently large PE32+ image
+   triggering a CpuPageTableLib defect. M6/M7 hit it on the parent
+   (firmware launches the parent via LoadImage+StartImage); M8.0
+   hits it on the child (the parent invokes LoadImage+StartImage on
+   its embedded chained payload).
+
+**M6.1 mitigations shipped 2026-06-09:**
+
+- `internal/embed_chained` now embeds the chained payload as
+  `chained_<arch>.efi.gz` (gzip -9 -n -c) and exposes
+  `Decompress() ([]byte, error)` that inflates on probe entry.
+  Cuts the M8.0 parent by ~870 KiB on amd64 (3.4 → 2.45 MiB) and
+  proportionally on the other arches — useful even where amd64
+  still trips the firmware bug.
+- `internal/liveefihandover/run.sh` amd64 case picks up the same
+  dummy `-netdev user + virtio-net-pci` device as M5/M6/M7
+  runners; the comment captures the empirical 2026-06-09 finding.
+- The runner's `embed length =` grep pattern loosened to match the
+  new probe wording (`embed length (decompressed) = N`).
+
+**M6.1 status: PARTIAL.** The mitigations land the precise root
+cause and shrink all four arches' M8.0 parent binaries, but the
+amd64 CpuPageTableLib bug still fires on the 1.7 MiB chained
+StartImage. Full amd64 fix requires either:
+
+- A real PE compressor that gets BOTH parent and child under the
+  CpuDxe threshold (= the M6.2 / UPX-go track — generic compression
+  library under `go-compressions`, PE32+/EFI-specific packer under
+  `go-coff/efipack`).
+- Building EDK2 OVMF from a current `master` that has the
+  CpuPageTableLib fix (if upstream has fixed it since
+  `edk2-stable202408`).
+- Patching CpuPageTableLib upstream and rebuilding (highest
+  leverage, slowest path).
+
+Tracked as **M6.2** in the milestone queue.
 
 riscv64 was deferred in M5 due to a separate timing bug; that bug
 is asymptomatic at the M6 boundary (the inline-pump pattern from M3
@@ -1596,6 +1654,7 @@ distinctive banner from the chained payload as the proof.
 | `uefiboard/loadimage_test.go` (host-side, 100% line cov)               |  131 |
 | `cmd/chainedhello/main.go` (the chained payload)                       |   50 |
 | `internal/embed_chained/{doc.go, chained_<arch>.go ×4, .gitignore}`    |   54 |
+| `internal/embed_chained/{decompress.go, chained_host.go, *_test.go}`   |  150 |
 | `phase2_efi_handover.go` (parent probe)                                |  120 |
 | `phase2_efi_handover_stub.go` (no-tag stub)                            |   17 |
 | `internal/liveefihandover/run.sh`                                      |  210 |
@@ -1638,7 +1697,8 @@ probe therefore SKIPS `UnloadImage` on a clean (status=0) return
 and only calls it when the child returned a non-zero status (where
 the firmware may keep the image around for diagnostics).
 
-**Live results (2026-06-09)** — QEMU+EDK2 only (no networking):
+**Live results (2026-06-09, refined post-M6.1 investigation)** —
+QEMU+EDK2 only (no networking):
 
 |  arch   | result | notes                                                            |
 |---------|:------:|------------------------------------------------------------------|
@@ -1646,10 +1706,12 @@ the firmware may keep the image around for diagnostics).
 | riscv64 |  PASS  | clean gBS->Exit return; wall ≈ 30 s                              |
 | loong64 |  PASS  | clean gBS->Exit return; wall ≈ 30 s (BDS prepends one stray 'A'  |
 |         |        | char before the banner — cosmetic, doesn't affect mechanism)     |
-| amd64   |  FAIL  | EDK2 BDS skips fs0 and falls to PXE — same M6.1 OVMF PE-load     |
-|         |        | bug seen on the M6 / M7 4-5 MiB PE32+ binaries; parent is 3.4    |
-|         |        | MiB, presumably also over the OVMF threshold. Pre-existing       |
-|         |        | bug; not an M8.0 regression. Mechanism proven on the other 3.    |
+| amd64   |  FAIL  | Parent now loads cleanly (M6.1 gzip-embed brought it to 2.45     |
+|         |        | MiB and the runner now includes the dummy virtio-net device      |
+|         |        | the other amd64 runners carry); StartImage on the 1.7 MiB        |
+|         |        | chained PE faults `#GP` at CpuDxe.dll +0x110C — same             |
+|         |        | CpuPageTableLib bug as M6 HTTPS amd64 (RIP 0x7EF6710C,           |
+|         |        | ImageBase 0x7EF56000). M6.2 / UPX-go required.                   |
 
 For each PASS the log shows (from parent + child interleaved):
 
