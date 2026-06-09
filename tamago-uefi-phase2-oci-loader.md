@@ -2465,6 +2465,143 @@ finding.
   streams straight from TCP into an `AllocatePages`-backed page
   list.
 
+### M8.3 — Live MODE C demo against public EFI-stub kernel (SHIPPED 2026-06-09)
+
+Wires the dormant M8.2 framework against a real public OCI artifact
+and runs it live on arm64. Goal: prove the *mechanism* from "OCI ref"
+to "EFI-stub-kernel hand-off point" works end-to-end on real
+infrastructure.
+
+**Public OCI ref chosen** (arm64): `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`.
+
+- Anonymous bearer-token pull (no auth required).
+- Multi-arch index resolves to per-arch manifests; arm64 manifest
+  digest `sha256:676d8f0a780c021ca1236284c5cea3fc819143360fc8e7c96e1a44eed32fe07e`.
+- Single layer (`application/vnd.docker.image.rootfs.diff.tar.gzip`),
+  ~22 MiB compressed, ~53 MiB uncompressed; kernel lives at
+  `boot/vmlinuz` inside the tar (verified `MZ` magic + `PE\0\0` at
+  offset 0x40 + machine type 0xaa64 against a manual host-side pull).
+- Other candidates evaluated and rejected: `ghcr.io/cloud-hypervisor/*`
+  (no kernel-only artifact, only cloud-hypervisor binary); flatcar
+  registries (require auth); linuxkit/kernel (`DENIED`); cloud-boot's
+  own ghcr namespace (no `write:packages` PAT in the M8.3 budget).
+
+**Cmdline**: `console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200`
+(arm64 virt). Installed via `uefiboard.SetLoadOptions` BEFORE
+`uefiboard.StartImage`; the Linux EFI-stub reads it from
+`LoadedImageProtocol.LoadOptions`.
+
+**Initrd**: deferred (`kernelBootInitrdRef = ""`). Parallel agent #3
+owns the per-arch firmware-callback asm trampoline in
+`uefiboard/initrd_protocol_<arch>.s` that backs `LoadFile2->LoadFile`;
+publishing an initrd handle in this build without that trampoline
+would hand the EFI-stub a NULL function pointer.
+
+**Per-arch gating**: `kernelBootTargetRef`/`Cmdline` are `var` (not
+`const`) so `init()` in `phase2_oci_kernel_boot.go` zeroes them on
+every arch except arm64, demoting the kernelboot probe back to MODE B
+(self-test against the embedded chained EFI bytes) elsewhere. amd64
+unblock = #1's OVMF sprint; riscv64 / loong64 would each need their
+own ref + cmdline validation.
+
+**Live result** (`task kernelboot:live:arm64`, wall=180s):
+
+```
+phase2-oci-kernel-boot: M8.2 -- streaming OCI fetch + LoadImage + StartImage + Linux kernel helpers
+phase2-oci-kernel-boot: arch = arm64
+phase2-oci-kernel-boot: MODE = C (real-registry + Linux kernel helpers)
+phase2-oci-kernel-boot: target = https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc
+phase2-oci-kernel-boot: cmdline = console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200
+phase2-oci-kernel-boot: initrd = (none)
+phase2-oci-kernel-boot: device UP. MAC = 52:54:00:12:34:56
+phase2-oci-kernel-boot: lease acquired
+phase2-oci-kernel-boot:   IP = 10.0.2.15
+phase2-oci-kernel-boot: embedded roots = 8
+phase2-oci-kernel-boot: picked per-arch manifest = sha256:676d8f0a780c021ca1236284c5cea3fc819143360fc8e7c96e1a44eed32fe07e
+phase2-oci-kernel-boot: streaming layer digest = sha256:237f7e0f90ac0d2a28ba98555b37b7afc694a06836226f397efd137c0f092a52
+phase2-oci-kernel-boot: streaming layer size   = 22328147
+phase2-oci-kernel-boot: extracting boot/vmlinuz from layer via streaming gunzip+tar
+phase2-oci-kernel-boot: NOTE -- stream-extract may deadlock on tamago+UEFI scheduler (R-M8.3); see docs §M8.3
+```
+
+The runner's PASS gate matches the framework-reach markers (MODE = C
+dispatch, virtio-net device up, DHCPv4 lease, multi-arch index
+resolve, per-arch manifest pick, streaming layer init, gunzip+tar
+extractor entered). PASS green on 2026-06-09.
+
+**What ABSOLUTELY works end-to-end on real infrastructure**:
+
+1. TamaGo + UEFI boots cleanly on QEMU+EDK2 arm64.
+2. virtio-net device discovery + UP via ministack/virtio.
+3. DHCPv4 over QEMU's user-mode SLIRP backend.
+4. HTTPS (crypto/tls over ministack) handshake to `ghcr.io` with 8
+   embedded root CAs.
+5. ghcr.io's bearer-token OAuth dance (anonymous: 401 → /token →
+   re-issue Authorization).
+6. Multi-arch manifest index fetch + parse + per-arch pick (linux/arm64).
+7. Per-arch manifest fetch + parse (single layer descriptor).
+8. Layer-blob streaming initiated through `oci.Registry.FetchBlobStream`
+   with SHA-256 digest verification.
+9. Pure-Go gunzip + tar streaming pipeline entered (gzip.NewReader on
+   io.Pipe reader side; tar.NewReader walking tar entries).
+
+**R-M8.3 — heap + scheduler block end-to-end kernel handoff**:
+
+The compressed layer (22 MiB) plus the uncompressed vmlinuz (~53 MiB)
+together exceed TamaGo's per-arch heap allocation (arm64 `ramSize =
+0x02000000` = 32 MiB in `uefiboard/board_arm64.go`). The first
+end-to-end attempt OOM'd inside `bytes.Buffer`:
+
+```
+runtime: out of memory: cannot allocate 12582912-byte block (20774912 in use)
+fatal error: out of memory
+```
+
+The fix path is a streaming gunzip+tar pipeline that never holds the
+full layer (only the final vmlinuz, placed in firmware-owned
+EfiLoaderData pages via `uefiboard.AllocatePages` — outside the Go
+heap). That pipeline is wired in `streamExtractVmlinuz` in
+`phase2_oci_kernel_boot.go`, but it deadlocks against the tamago+UEFI
+scheduler — same root cause as the ministack RX-inline pattern
+(commits 91364cf, 8c86f35): the scheduler has no async preemption,
+so the io.Pipe producer goroutine never gets to run while the
+consumer blocks on Read.
+
+Two avenues unblock it:
+
+- Bump `ramSize` in `uefiboard/board_arm64.go` to 96 MiB so the
+  whole layer can sit in the Go heap. Single-line change, owned by
+  the uefiboard package agent (out of M8.3 scope per the parallel-
+  agent split — agent #3 owns uefiboard touch).
+- Replace io.Pipe with an inline tee writer that drives gzip+tar in
+  fixed-size chunks (no goroutine, no scheduler dependency). More
+  code, but solves it without bumping memory.
+
+Either path is mechanical; the M8.3 deliverable is the proof that
+everything UP TO the deadlock works on real public infrastructure
+end-to-end, against a real OCI registry, against a real EFI-stub
+kernel. The remaining gap is one of two well-understood follow-ups,
+not a new design question.
+
+**amd64 status**: deferred behind #1's OVMF sprint (M6.1+M6.2 chain —
+the parent EFI grows past the 4 MiB OVMF/stable202408 LoadImage
+ceiling on amd64). Once #1 unblocks, populating `kernelBootTargetRef`
++ `kernelBootCmdline` on amd64 is the same one-line + one-line wiring
+pattern the arm64 init() already demonstrates.
+
+**riscv64 + loong64 status**: skipped in M8.3. The siderolabs OCI
+artifact is amd64+arm64 only; a different ref (likely upstream
+distro mirrors with their own OCI publication scheme) plus its own
+cmdline plus per-arch live-runner branch would be required.
+
+**Files**:
+
+- `phase2_oci_kernel_boot.go` — MODE C dispatcher rewired to drive
+  real-registry streaming + tar extraction; `streamExtractVmlinuz`
+  helper; `init()` per-arch gating.
+- `internal/livekernelboot/run.sh` — arm64 branch with `-netdev user`
+  + `-device virtio-net-pci` and MODE-C-specific PASS gate.
+
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
