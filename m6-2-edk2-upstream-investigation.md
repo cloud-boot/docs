@@ -498,3 +498,165 @@ M6 HTTPS and M7 OCI still fail (different bug). Per the task brief
 ("merge to main ONLY IF the smoke matrix is green"), the branch stays
 open with the patched-OVMF runner changes committed, and the second
 bug becomes the next phase.
+
+## 11. R-amd64a — TamaGo amd64 #PF post-OVMF-patch (2026-06-09)
+
+### 11.1 Symptom
+
+After the patched OVMF landed (§ 10), the M6 HTTPS / M7 OCI / efipack
+`*-packed` rows that previously failed with the firmware-side
+`CpuDxe.dll +0x110C` #GP now fail with a different fault — fired
+DURING the TamaGo runtime's bring-up, not in the firmware:
+
+```text
+!!!! X64 Exception Type - 0E(#PF - Page-Fault)  CPU Apic ID - 00000000 !!!!
+ExceptionData - 0000000000000000  I:0 R:0 U:0 W:0 P:0 PK:0 SS:0 SGX:0
+RIP  - 00000000000A5003, CS  - 0000000000000038
+RSP  - 00000000A909B6A0, ... CR2 - FFFFFFFF980098E4
+CR3  - 000000007FC01000
+!!!! Can't find image information. !!!!
+```
+
+`P:0` = page not present; the CPU walked the firmware's page tables
+(CR3 = OVMF's, since cpuinit_amd64.s explicitly does NOT touch them)
+and found no PTE for either RIP or the CR2 effective address.
+
+### 11.2 Root cause
+
+cpuinit_amd64.s derives `goos.RamStart = &runtime.text - 64 KiB`,
+then `goos.RamSize = 704 MiB` is hard-coded in board_amd64.go (`var
+ramSize uint64 = 0x2c000000`). The runtime stack therefore lives at
+`RamStart + RamSize - RamStackOffset` ≈ `&runtime.text + 704 MiB`.
+
+The QEMU `-m 2048` q35 machine type has its high RAM topping out at
+`0x8000_0000` (the rest is the 32→64-bit PCI MMIO hole). Under the
+patched OVMF, the new GCD-aware image-protection logic
+(`5ccb5fff02` + `867fad874a` + `b5bab75e58`) loads multi-MiB images
+near the TOP of free RAM — empirically `ImageBase ≈ 0x7D1A_9000` for
+the 4.9 MiB HTTPS probe — so `RamStart + 704 MiB` lands well past
+`0x8000_0000`, inside the PCI MMIO hole. The first push/spill
+against that SP traps; the resulting MMIO-induced corruption (the
+hole returns 0xFF on read on q35) then drops the CPU into an
+unmapped-RIP region and the #PF dumper can't identify any image
+covering the new RIP.
+
+Sub-3 MiB images survived only because OVMF still placed them in the
+low end of free RAM, where `text + 704 MiB` happened to fit inside
+`[0, 0x8000_0000)`.
+
+### 11.3 Investigation evidence
+
+- **RIP=0xA5003 is NOT a return-address corruption pattern.** With
+  RSP=0xA909B6A0 and RamStackOffset=0x100000 (1 MiB from
+  `tamago/amd64/amd64.go:51`), reverse-solving `SP = RamStart +
+  RamSize - RamStackOffset` gives `RamStart ≈ 0x7D19_B6A0`, and
+  `runtime.text = RamStart + 64 KiB ≈ 0x7D1A_B6A0`. The image's
+  PE32+ `.text` section starts at `RVA 0x1000`, so the loaded
+  ImageBase ≈ 0x7D1A_A000 — confirmed live (one failing dump
+  printed `ImageBase=0x7D19F000, EntryPoint=0x7D26A8C0`, matching
+  within page granularity).
+
+- **The 32-MiB-RamSize attempt got farther but still hit firmware-
+  protected memory.** Lowering to `0x0200_0000` lets HTTPS reach
+  the runtime's first `efiCall` (eficall_amd64.s), where the
+  thunk's `SP = RamStart + RamSize` then `SUBQ $0x30, SP` →
+  `MOVQ R11, 0x20(SP)` writes to `0x7F19_0FF0`. CR2 matches, but
+  now `P:1 W:1` — a PROTECTION VIOLATION on write. The patched
+  OVMF marks the firmware allocator's regions
+  (`[0x7E000000..0x7FFF0000]` empirically: GDTR at 0x7F9DB000,
+  IDTR at 0x7BF6AF58, CR3 at 0x7FC01000, FXSAVE at 0x7F9DA460,
+  exception-handler stack at 0x7FE3D…) as RO/XP. Our heap/stack
+  CANNOT safely use ANY memory in the firmware-allocator range,
+  not just the area above 0x8000_0000.
+
+- **A small RamSize (e.g. 32 MiB) breaks EFIHANDOVER too.** With
+  the parent loader at ImageBase ≈ 0x7D96B000, the chained child
+  loaded via `gBS->LoadImage` lands at ImageBase ≈ 0x7D95F000, and
+  `text + 32 MiB = 0x7F95F000` still overlaps firmware-protected
+  pages → #PF P:1 W:1 at CR2=0x7E3F6000. Sub-image-size RamSize
+  values (< image_end → next-firmware-region gap) are too small
+  to bring the runtime up.
+
+### 11.4 Proper fix (designed, partially implemented, not shipped)
+
+Switch cpuinit to `gBS->AllocatePages(EFI_ALLOCATE_ANY_PAGES,
+EfiLoaderData, RamSize>>12, &heapBase)`, mirroring
+cpuinit_arm64.s / cpuinit_riscv64.s / cpuinit_loong64.s. The
+allocator returns a guaranteed-RAM, RW, NX-free, page-aligned
+region that, by construction, does NOT overlap firmware code, data,
+or the loaded image. Wire `goos.RamStart = goos.Bloc = heapBase`,
+then SP = `heapBase + RamSize - RamStackOffset` lands inside that
+region.
+
+A draft of this fix was implemented during the R-amd64a sprint but
+hit a SECONDARY regression: `runtime·rt0_amd64_tamago` in
+`tamago-pie/src/runtime/sys_tamago_amd64.s:120-123` reads argc from
+`24(SP)` and argv from `32(SP)`:
+
+```asm
+MOVL    24(SP), AX            // copy argc
+MOVL    AX, 0(SP)
+MOVQ    32(SP), AX            // copy argv
+MOVQ    AX, 8(SP)
+```
+
+Under the bare-metal `init.s`, this works because the PML4/PDPT
+setup memset-zeroed the same region before SP was retargeted (an
+implicit zero-init contract). Under a fresh `AllocatePages`
+allocation the bytes are UNDEFINED — and even zeroing the first
+64 bytes of the new stack window manually in cpuinit was not
+sufficient: the runtime later crashed with a #GP on a non-canonical
+RIP (`0x55415641_E5894855` — recognisable as the function-prologue
+bytes `55 48 89 E5 41 56 41 55` of some Go function, popped off
+the stack as a return address), suggesting more of the bootstrap
+stack — possibly the goroutine's istack guard pages or the
+firstmoduledata-driven type bitmaps — needs a defined initial
+state. The proper handoff probably needs to:
+
+1. memset the entire allocated region to 0 (not just 64 bytes),
+2. seed a minimal argc/argv frame at the new SP (argc=0, argv=NULL),
+3. ensure the heap bloc is anchored AT the allocated base (not at
+   `firstmoduledata.end` which is OUTSIDE our region — done by
+   setting `goos.Bloc` to the same value as `goos.RamStart`).
+
+### 11.5 What shipped this sprint
+
+NOTHING in this iteration — board_amd64.go and cpuinit_amd64.s are
+left at their pre-sprint state to keep MINISTACK / HTTP / DHCP4 /
+EFIHANDOVER (M3/M5/M8.0) passing. The full AllocatePages handoff
+and the rt0 argc/argv seeding were de-risked but the secondary
+regression couldn't be unstuck inside the 90-minute hard cap.
+
+### 11.6 Concrete next-sprint plan
+
+1. Reapply the `cpuinit_amd64.s` AllocatePages variant (kept in
+   the agent's transcript / git stash if available, otherwise
+   re-derive from cpuinit_arm64.s with the MS x64 ABI swap).
+
+2. Replace the manual `MOVQ DI, AX; XORL AX, AX; STOSQ * 8` zero
+   loop with a full `REP STOSB` over the entire allocated region
+   BEFORE setting SP — guarantees the istack guard pages, the
+   argc/argv slot, the early `mpreinit` malloc, etc. all start
+   from zeroed memory.
+
+3. Push a tamago-pie patch (DO NOT push to main — upstream fork)
+   adding a `MOVQ $0, 24(SP); MOVQ $0, 32(SP)` pair at the top of
+   `runtime·rt0_amd64_tamago` so the bootstrap-stack zero-init
+   contract is explicit rather than relying on the cpuinit's
+   discipline. Keep locally; user will upstream.
+
+4. Re-run the full amd64 smoke matrix (`task live:*:amd64`) and
+   gate the merge of `m6-2-pr2-amd64-wip` on a fully-green result.
+
+5. Document the AllocatePages handoff invariant in the README's
+   per-arch table — currently arm64 / riscv64 / loong64 each
+   advertise it; amd64 should too once shipped.
+
+### 11.7 Files / state
+
+- **No code changes shipped** this sprint (R-amd64a). The smoke
+  matrix is unchanged from § 10.4.
+- This § 11 documents the root cause + the partial-fix attempt +
+  the concrete next-sprint plan so the next agent can pick up
+  without re-deriving the trace.
+
