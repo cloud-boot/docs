@@ -212,7 +212,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
-| M8.2        | deferred                            | real Linux kernel: CMDLINE + initrd + EFI_LOAD_FILE2_PROTOCOL |
+| **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 
 ### M0 — Probe + type surface (done)
 
@@ -2356,6 +2356,79 @@ PCI walk → virtio-net up → DHCPv4 → DNS → TLS handshake (embedded roots)
 amd64 stays on `m6-2-pr2-amd64-wip` pending Block-IO side-channel
 debug. M8.2 picks up real-kernel cmdline + initrd handoff against a
 public OCI registry.
+
+### M8.2 — Linux kernel helpers (framework SHIPPED 2026-06-09)
+
+**Deliverable.** Extend M8.1's MODE A real-registry path with the
+two Linux-specific helpers an EFI-stub kernel needs at boot:
+
+1. **CMDLINE** via `uefiboard.SetLoadOptions(handle, cmdline)`:
+   encodes the cmdline as UTF-16 LE + NULL terminator, looks up
+   `EFI_LOADED_IMAGE_PROTOCOL` on the just-LoadImage'd handle, sets
+   `LoadOptionsSize` + `LoadOptions` fields. The Linux EFI-stub
+   reads its cmdline from there (UEFI 2.10 §9.2 / Linux
+   Documentation/admin-guide/efi-stub.rst). Must be called between
+   `LoadImage` and `StartImage`.
+2. **initrd** via `uefiboard.PublishInitrd(initrd []byte) (handle,
+   error)` + `UnpublishInitrd(handle) error`: installs an
+   `EFI_LOAD_FILE2_PROTOCOL` instance under a fresh handle whose
+   device path carries the `LINUX_EFI_INITRD_MEDIA_GUID`
+   (`5568e427-68fc-4f3d-ac74-ca555231cc68`). The kernel's EFI-stub
+   walks the protocol set looking for that GUID + calls `LoadFile`
+   on the protocol to pull initrd into a kernel-supplied buffer.
+
+`phase2_oci_kernel_boot.go` grows a 3-way mode dispatch:
+
+- **MODE B** (default): `kernelBootTargetRef == ""` → in-process
+  Transport self-test (M8.1 minimal). Live PASS on 3 arches.
+- **MODE A**: `kernelBootTargetRef != "" && kernelBootCmdline == ""`
+  → real-registry streaming + LoadImage + StartImage (M8.1 minimal
+  with a real ref). Currently dormant pending a public OCI ref.
+- **MODE C**: `kernelBootTargetRef != "" && kernelBootCmdline != ""`
+  → real-registry streaming + (optional) initrd publish +
+  SetLoadOptions + LoadImage + StartImage. The Linux-kernel-specific
+  path. Currently dormant pending public ref + cmdline.
+
+**M8.2-PARTIAL caveat on initrd.** `PublishInitrd` installs the device
+path + protocol struct + handle, but the `LoadFile` slot in the
+struct is currently NULL. The per-arch firmware-callback asm
+trampoline that lets the EFI-stub call our Go LoadFile across the
+calling-convention boundary has not yet shipped. A real EFI-stub
+that calls `LoadFile2->LoadFile` on the published handle will fault.
+Setting `kernelBootInitrdRef` wires the framework but is not expected
+to boot end-to-end against an upstream kernel until the trampoline
+lands. Cmdline (SetLoadOptions) does NOT have this issue — it's a
+pure-data write into a firmware-managed struct, no callback needed.
+
+**Files shipped (1133 LOC):**
+
+- `uefiboard/load_options.go` + `_host.go` + `_tamago.go` (276 LOC)
+  + `_test.go` (187 LOC) — `SetLoadOptions`, UTF-16 LE encoder,
+  100% on host-buildable parts.
+- `uefiboard/initrd_protocol.go` + `_host.go` + `_tamago.go` (444
+  LOC) + `_test.go` (178 LOC) — `PublishInitrd` + `UnpublishInitrd`
+  + device-path construction + (placeholder) LoadFile.
+- `phase2_oci_kernel_boot.go` — MODE C dispatch + dormant entry +
+  symbol-touches to keep the new uefiboard surface linked.
+
+**Live results (2026-06-09).** MODE B regression on arm64 still
+PASSes the M8.1 minimal acceptance gate (`KERNEL-BOOT OK`). MODE A
++ MODE C are dormant (constants empty) — populate to enable.
+
+**What still gates a live Linux kernel boot via OCI (= M8.3?):**
+
+- A **public OCI ref** for an EFI-stub-bootable Linux kernel
+  artifact. Candidates: `ghcr.io/cloud-hypervisor/*` (microVM
+  kernels), Talos/Flatcar's published vmlinuz, or our own
+  published-via-`write:packages`-PAT kernel.
+- For initrd: the per-arch **firmware-callback asm trampoline** in
+  `uefiboard/initrd_protocol_<arch>.s` (~50 LOC × 4 arches). The
+  trampoline preserves MS-x64 / AAPCS64 / LP64 calling conventions
+  around our Go LoadFile callback. Hand-written asm needed because
+  TamaGo doesn't synthesise this kind of EFI-callable function
+  signature from Go source.
+- For amd64: M6.2 unblock via OVMF upgrade (see §M6.1+M6.2 EDK2
+  upstream investigation).
 
 ### M8.1-archive — original Linux EFI-stub handover design (deferred)
 
