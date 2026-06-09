@@ -62,6 +62,49 @@ single `.text` section means `ProtectUefiImage` issues at most one
 RO setter and one XP setter for the whole image, which sidesteps the
 GCD-bypass corruption pattern.
 
+### 2.1 Live BlkRingBuffer trace (2026-06-09, M6.2 PR2 efipackstub)
+
+The M6.2 PR2 stub for amd64 was instrumented with the M1.6 Block-IO
+side-channel ring buffer (commit `b350b2d` on
+`m6-2-pr2-amd64-wip`) and re-run with a dedicated virtio-blk-pci
+scratch disk so a tracepoint could be dropped after every
+firmware-callable step. Input: `BOOTX64-HTTP.EFI` packed via
+`efipack.Pack` (`Flate`); ESP boots packed binary; scratch disk
+holds the ring buffer.
+
+Last tracepoint flushed before the #GP:
+
+```text
+efipackstub: gBS->StartImage on child           <-- LAST PRINTED LINE
+[X64 #GP at RIP=0x7EF6710C  CpuDxe.dll +0x110C]
+```
+
+Preceding tracepoints (all OK):
+
+```text
+readOwnFile: file->Read                         OK (3,108,352 bytes)
+efipackstub: parsing PE for .payload (on-disk)  OK
+payload.len=1,313,792
+uncompressedSize=3,173,888                       (= original BOOTX64-HTTP.EFI)
+efipackstub: AllocatePages for decompressed image OK
+pagesAddr=0x7DA14000  (775 pages)
+efipackstub: decompressing flate stream         OK
+efipackstub: gBS->LoadImage on decompressed bytes  OK
+childHandle=0x7DEE6D98
+efipackstub: gBS->StartImage on child           <-- CRASH INSIDE FIRMWARE
+```
+
+This is **empirical proof** that the stub's end-to-end pipeline is
+correct: the file is re-read off disk, the `.payload` section is
+located, decompressed in place, and `gBS->LoadImage` returns a valid
+child handle. The #GP fires inside the firmware's `StartImage`
+path itself — exactly the same `CpuDxe.dll +0x110C` PC identified by
+the M6.1 de-risk sweep. (Note: the "M5 HTTP PASS (mystery)" entry in
+the table above refers to running the ORIGINAL `BOOTX64-HTTP.EFI` —
+when re-loaded via `gBS->LoadImage` of an in-RAM decompressed buffer,
+StartImage crashes identically. The bug fires the moment any
+multi-section PE32+ goes through the protect-then-start path.)
+
 ## 3. EDK2 source files reviewed
 
 Cloned `edk2-stable202408` to `/tmp/edk2-202408` and full master to
