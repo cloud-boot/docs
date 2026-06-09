@@ -205,6 +205,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
 | M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
 | M6.2 PR2    | **arm64/riscv64/loong64 GREEN 2026-06-09** (amd64 deferred → `m6-2-pr2-amd64-wip`) | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
+| **M6.2**    | **SHIPPED (3/4 arches) 2026-06-09; amd64 deferred** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
 | **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
@@ -1676,6 +1677,62 @@ to the resolved IP, runs a real TLS handshake with cert-chain
 verification against the embedded bundle, prints `HTTP/1.1 200 OK`,
 content length 528, and the first 64 bytes of the body
 (`<!doctype html>...`).
+
+#### M6.2 — SHIPPED summary (PR1 + PR2 + PR3, 2026-06-09)
+
+The M6.2 PE compressor lands in three PRs across three repos.
+Consolidated wins:
+
+- **PR1 — `go-coff/efipack` library skeleton.** Host-side `Pack(in,
+  out, opts) (PackResult, error)`, PE32+/EFI envelope assembly,
+  `Compressor` enum (`Flate` / `LZFSE` / `LZ4`), `bodyCodec`
+  interface, round-trip tests proving the bytes in `.payload`
+  decompress back to the original input. PR1 output was structurally
+  valid PE but its `.stub` was a `TODO_STUB` placeholder.
+- **PR2 — per-arch self-extracting stub blobs.** Shared TamaGo PIE
+  source at `cloud-boot/tamago-uefi/cmd/efipackstub` builds for any
+  GOARCH; per-arch PE32+ blobs embedded into
+  `go-coff/efipack/stub/blobs/<arch>.efi.bin` via `//go:embed` and
+  used as the envelope base PE by `efipack.Pack`. AppendBefore
+  (added to `go-coff/peln` in v0.3.0) slots `.payload` before
+  `.reloc` in the section table so EDK2-style PE loaders copy the
+  payload bytes into RAM. arm64 / riscv64 / loong64 GREEN; amd64
+  on `m6-2-pr2-amd64-wip` (in-stub runtime crash).
+- **PR3 — `pectl pack` CLI + consolidated smoke matrix.**
+  `pectl pack [-c flate|lzfse|lz4] [--level N] -o output.efi
+  input.efi` wraps `efipack.Pack` as a user-facing CLI. `lzfse`
+  and `lz4` surface `ErrCompressorNotImplemented` as a clean error
+  (M6.2 PR4 wires LZFSE via `go-compressions/lzfse v0.1.0`). New
+  `efipack:smoke:all` Taskfile target chains the per-arch smokes
+  and drops a Markdown matrix at `/tmp/efipack-smoke-matrix.md`.
+  Tags pushed: `go-coff/peln v0.3.0`, `go-coff/efipack v0.1.0`.
+
+Final consolidated matrix (QEMU 9.2.0 + EDK2, `-netdev user`,
+sizes are `original on-disk → packed envelope on-disk`):
+
+| ARCH    | HTTP                 | HTTPS                | OCI                  | EFIHANDOVER          |
+|---------|----------------------|----------------------|----------------------|----------------------|
+| arm64   | PASS (3.17→2.72 MiB) | PASS (4.45→3.29 MiB) | PASS                 | PASS                 |
+| riscv64 | PASS (2.85→2.68 MiB) | PASS (4.30→3.26 MiB) | PASS (4.62→3.39 MiB) | PASS (1.98→2.55 MiB) |
+| loong64 | PASS (3.13→2.85 MiB) | PASS (4.74→3.45 MiB) | PASS (5.10→3.58 MiB) | PASS (2.16→2.74 MiB) |
+| amd64   | deferred (m6-2-pr2-amd64-wip) | — | — | — |
+
+Deferred follow-ups:
+
+- **amd64 stub deeper debug** via the M1.6 Block-IO side channel —
+  the firmware-mapping question that motivated PR2's "option 2"
+  (re-read own file via SimpleFileSystem) is resolved on aarch64 /
+  riscv64 / loongarch64 with the same Go source, so the amd64
+  crash is specifically an x86-64-PE/TamaGo-runtime interaction
+  and not a wire-format defect. Block-IO instrumentation will let
+  us print past the stub's first instructions on a hypervisor
+  where ConOut is captured but pre-EBS faults silence it.
+- **M6.2 PR4 — LZFSE codec wire-up.** The `go-compressions/lzfse`
+  library already ships v0.1.0; PR4 plugs it into
+  `efipack/compressor.go` `switchCompressor` and stages an
+  alternative `.stub` blob with the LZFSE decompressor. Cost:
+  the stub grows by ~100-200 KiB; gain: ~1 ratio point over flate
+  on cloud-boot binaries.
 
 ### M7 — OCI registry client — SHIPPED 2026-06-08
 
