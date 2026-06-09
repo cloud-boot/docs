@@ -1,6 +1,6 @@
 ---
 title: M6.2 amd64 firmware bug — EDK2 upstream investigation
-status: investigation complete 2026-06-09; recommendation = build patched OVMF (preferred) OR upgrade to edk2-stable202511+
+status: patched OVMF integrated 2026-06-09; M8.0 chainedhello + EFIHANDOVER unblocked, HTTPS / OCI hit a separate downstream #PF
 last-updated: 2026-06-09
 ---
 
@@ -336,17 +336,30 @@ requested range** — the bug closes.
 
 - [x] **2026-06-09:** investigation complete; this doc + 3 patches
       checked in alongside.
+- [x] **2026-06-09:** patched OVMF (edk2-stable202605, Fedora rebuild)
+      vendored into `~/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/`;
+      all amd64 live runners updated to prefer it. See § 10 below.
 - [ ] **pkgx pantry:** add a `tianocore.org/edk2` recipe that builds
       OVMF from `edk2-stable202511` (or current stable). De-couples
       our firmware blob from qemu's release cadence. See
       `feedback-package-completeness.md` and `feedback-add-missing-deps.md`
-      in user memory — this is exactly the pattern.
-- [ ] **cloud-boot:** once a patched/updated `edk2-x86_64-code.fd` is
-      reachable through pkgx, re-run the M6.2 amd64 sweep:
-      M6 HTTPS, M7 OCI, M8.0 chainedhello — all should PASS.
-- [ ] **cloud-boot:** then close M6.2 amd64 deferral; un-defer M6.2
-      amd64 from `tamago-uefi-phase2-oci-loader.md` and remove the
-      `m6-2-pr2-amd64-wip` branch.
+      in user memory — this is exactly the pattern. (Paralleled by a
+      separate agent on 2026-06-09; check
+      `~/Documents/VCS/GIT/localhost/pantry/projects/tianocore.org/edk2/`.)
+- [ ] **cloud-boot:** M6 HTTPS, M7 OCI still FAIL with the patched OVMF
+      but with a DIFFERENT exception (#PF at RIP=0x000A5003,
+      CR2 ≈ 0xFFFFFFFF98000000). This is NOT the original CpuDxe.dll
+      +0x110C #GP — that one is gone (proved by EFIHANDOVER original
+      now PASSing). The new failure looks like a TamaGo amd64 runtime
+      page-table set-up issue: the image enters at low RIP (0xA5003)
+      then immediately accesses a high-canonical address that is not
+      mapped in TamaGo's freshly-installed page tables. Sub-2.5MB
+      TamaGo images (M3/M4/M5, EFIHANDOVER) survive; larger ones
+      (HTTPS ≈ 4.9 MB, OCI ≈ 5.3 MB) do not. New investigation thread
+      needed; tracking in `tamago-uefi-phase2-oci-loader.md`.
+- [ ] **cloud-boot:** keep `m6-2-pr2-amd64-wip` open until the second
+      bug is closed; do NOT merge yet (smoke matrix below is amber not
+      green).
 
 ## 9. References
 
@@ -361,3 +374,127 @@ requested range** — the bug closes.
 - cloud-boot M6.1 / M6.2 de-risk:
   [`tamago-uefi-phase2-oci-loader.md`](tamago-uefi-phase2-oci-loader.md)
   §§ M6.1 investigation, M6.2 de-risk.
+
+## 10. Patched OVMF integration (2026-06-09)
+
+### 10.1 Source
+
+The patched OVMF blob comes from **Fedora's `edk2-ovmf` package**,
+build `20260508-2.fc45`, which packages **`edk2-stable202605`** (commit
+`b03a21a63e3b` per the Fedora spec's `%define GITCOMMIT`).
+
+```text
+URL:      https://kojipkgs.fedoraproject.org/packages/edk2/20260508/2.fc45/noarch/edk2-ovmf-20260508-2.fc45.noarch.rpm
+Upstream: github.com/tianocore/edk2 tag edk2-stable202605
+License:  BSD-2-Clause-Patent (OvmfPkg), see edk2-licenses.txt next to the .fd
+```
+
+`edk2-stable202605` carries **all three fixes** identified in § 5
+(plus the OvmfPkg page-alignment commit `4c8717de16` that lands in the
+same tag), so no on-top patching was needed.
+
+### 10.2 Install path
+
+The .fd blobs ship inside the RPM as qcow2 images (the Fedora OVMF
+distribution format). Convert to raw `.fd` and install at a
+pkgx-mimicked layout:
+
+```sh
+mkdir -p /tmp/edk2-fedora/extract
+bsdtar -xf edk2-ovmf-20260508-2.fc45.noarch.rpm -C /tmp/edk2-fedora/extract
+
+DEST="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu"
+mkdir -p "$DEST"
+qemu-img convert -f qcow2 -O raw \
+  /tmp/edk2-fedora/extract/usr/share/edk2/ovmf/OVMF_CODE_4M.qcow2 \
+  "$DEST/edk2-x86_64-code.fd"
+qemu-img convert -f qcow2 -O raw \
+  /tmp/edk2-fedora/extract/usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2 \
+  "$DEST/edk2-i386-vars.fd"
+cp /tmp/edk2-fedora/extract/usr/share/licenses/edk2-ovmf/License.txt \
+   "$DEST/edk2-licenses.txt"
+```
+
+Size + MD5 of the installed blobs:
+
+```text
+edk2-x86_64-code.fd  3,653,632 bytes   md5 e35cb6da7e06025ec2358edd7e6f2d15
+edk2-i386-vars.fd      540,672 bytes   md5 173134c7c1593bad9cd101dc10bef49b
+```
+
+(Same byte count as the pkgx-bundled qemu blobs — different content;
+the pkgx `edk2-x86_64-code.fd` MD5 is the buggy
+`661c68c8b0a2ed59d5e4a13563cd6e13` from Gerd's `edk2-stable202408`
+build.)
+
+A `PROVENANCE.txt` is dropped next to the .fd files with the same
+metadata so a stray `ls` answers the question without reading this doc.
+
+The pkgx-bundled `~/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd`
+is **NOT overwritten** — leaving it alone keeps every other QEMU user
+on the host on a known-good (if buggy-for-our-case) blob.
+
+### 10.3 Runner wiring
+
+All amd64 live runners under `cloud-boot/tamago-uefi/internal/*/run.sh`
+now prefer the patched OVMF when present, falling back to the
+pkgx-bundled buggy blob otherwise:
+
+```bash
+if [[ -f "$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd" ]]; then
+    FW_CODE_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd"
+    FW_VARS_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-i386-vars.fd"
+else
+    FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
+    FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+fi
+FW_CODE="${CLOUDBOOT_OVMF_AMD64_CODE:-$FW_CODE_DEFAULT}"
+FW_VARS="${CLOUDBOOT_OVMF_AMD64_VARS:-$FW_VARS_DEFAULT}"
+```
+
+The `CLOUDBOOT_OVMF_AMD64_{CODE,VARS}` env-var overrides remain the
+top-priority knob. CI can opt back to the buggy blob by setting them
+explicitly to the pkgx path.
+
+Runners touched (8): `efipacksmoke`, `livedhcp4`, `liveefihandover`,
+`liveefitinyhandover`, `livehttp`, `livehttps`, `liveministack`,
+`liveoci`. Other arches (arm64 / riscv64 / loong64) keep using the
+pkgx-bundled OVMF — no change needed.
+
+### 10.4 Smoke matrix — amd64, patched OVMF
+
+Run on 2026-06-09 against `edk2-stable202605` Fedora rebuild:
+
+| Stage | Test                                   | pkgx (buggy) | patched OVMF | Δ |
+|-------|----------------------------------------|--------------|--------------|---|
+| M3    | livedhcp4 amd64                        | PASS         | PASS         |   |
+| M4    | liveministack amd64                    | PASS         | PASS         |   |
+| M5    | livehttp amd64                         | PASS         | PASS         |   |
+| M6    | livehttps amd64                        | FAIL #GP     | FAIL #PF*    | partial |
+| M7    | liveoci amd64                          | FAIL #GP     | FAIL #PF*    | partial |
+| M8.0  | liveefihandover amd64 (BOOTX64-EFIHANDOVER child-LoadImage) | FAIL #GP | **PASS**     | **FIXED** |
+| M8.1  | liveefitinyhandover Z2M/Z1M/Z64K/Z     | PASS         | PASS         |   |
+| M8.1  | liveefitinyhandover variant=C (multi-section TamaGo, LoadImage-only) | PASS | PASS |   |
+| M8.2  | efipacksmoke HTTP original             | PASS         | PASS         |   |
+| M8.2  | efipacksmoke HTTPS original            | FAIL #GP     | FAIL #PF*    | partial |
+| M8.2  | efipacksmoke OCI original              | FAIL #GP     | FAIL #PF*    | partial |
+| M8.2  | efipacksmoke EFIHANDOVER original      | FAIL #GP     | **PASS**     | **FIXED** |
+| M8.2  | efipacksmoke \*-packed (4 rows)        | n/a (blocked) | FAIL #PF*   | newly reachable |
+
+`*` The new #PF is **not** the original `CpuDxe.dll +0x110C` #GP. It
+fires at `RIP=0x000A5003`, P=0 (page not present), CR2 in the
+`0xFFFFFFFF9800xxxx` range — i.e. inside the loaded image after
+TamaGo has installed its own page tables, accessing a high-canonical
+address that isn't mapped. The original EDK2 image-protection bug is
+genuinely gone (EFIHANDOVER original and chained-via-handover both
+PASS now); this is a separate, downstream issue that needs its own
+investigation. See § 8 follow-up bullet.
+
+### 10.5 WIP merge status
+
+`m6-2-pr2-amd64-wip` is **NOT merged**. The matrix is amber: M8.0
+chainedhello and the EDK2-firmware-bug-bound failures are fixed, but
+M6 HTTPS and M7 OCI still fail (different bug). Per the task brief
+("merge to main ONLY IF the smoke matrix is green"), the branch stays
+open with the patched-OVMF runner changes committed, and the second
+bug becomes the next phase.
