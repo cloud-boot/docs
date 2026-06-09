@@ -1825,6 +1825,110 @@ verify the manifest digest's signature before any blob descend.
 ECDSA P-256 + Ed25519 keys only; transparency-log inclusion proof
 is the OCI signature scheme, not signed-text.
 
+### M7.alt — oras.land/oras-go/v2 evaluation (POC SHIPPED 2026-06-09)
+
+**Status:** Parallel POC SHIPPED — no replacement of the M7
+hand-rolled client. Goal is to measure binary-size delta + verify
+functional parity so the post-M6.2 decision is data-driven.
+
+**Why parallel:** the M7 + M7.1a client is ours; oras-go is the
+canonical pure-Go OCI client. Swapping would mean less code we own
+but at the cost of dragging `net/http` + the OCI image-spec types
+into the binary. The trade is "code locality" vs. "binary size" —
+the M6.2 PE compressor work changes the size argument, so the
+verdict is deferred until then.
+
+**Deliverables (shipped):**
+
+- `uefiboard/ministack/orasoci/transport.go` —
+  `MinistackRoundTripper` implementing `net/http.RoundTripper`.
+  Per-request: parse URL → dial via `Stack.DialTLS` (HTTPS) or
+  `Stack.DialTCP4` (HTTP) → write request line + headers via
+  `bufio.Writer` → read response via
+  `ministack.NewLineReader` + `ministack.StreamHTTPResponseHeaders`
+  → surface `*http.Response` whose Body is an `io.Pipe` writer
+  streaming from the same conn (goroutine bridges header read and
+  body Read). Honours `req.Context()` cancellation best-effort (pre-
+  write + pre-body checks); no keep-alive, no HTTP/2. ~480 LOC,
+  one file.
+- `uefiboard/ministack/orasoci/client.go` — thin wrapper around
+  `oras.land/oras-go/v2/registry/remote.Repository` pre-wired with
+  the round-tripper + an `auth.Client` for anonymous-pull ghcr.io
+  bearer dance. `FetchToMemory(ctx, ref)` does `oras.Copy` into a
+  fresh `memory.New()` store.
+- `uefiboard/ministack/http.go` — exported `NewLineReader` and
+  `StreamHTTPResponseHeaders` (was previously package-private)
+  so the orasoci package can reuse the M7.1a streaming parser
+  without re-implementing it.
+- `phase2_oci_oras_fetch.go` + `_stub.go` — gated probe
+  (`-tags phase2_oci_oras_fetch`). DHCP → CA roots →
+  `orasoci.NewRepository` → `repo.Resolve(tag)` → `Manifests().Fetch`
+  → read body. Prints `manifest digest`, `manifest bytes fetched`,
+  `ORAS-FETCH OK`.
+- Taskfile targets `orasoci:{elf,efi,test,all}:<arch>` +
+  `live:orasoci:<arch>` (amd64 skipped pending M6.2, mirroring
+  `live:ocistream:amd64`).
+- `internal/liveorasoci/run.sh` — live runner cloned from
+  `liveocistream/run.sh` with the same arm64/riscv64/loong64
+  matrix and amd64 skip.
+
+**Binary-size comparison (BOOT*.EFI after pectl link-pie):**
+
+| arch    | BOOT*-OCI.EFI (M7 hand-rolled) | BOOT*-ORASOCI.EFI (oras-go) | delta       |
+|---------|-------------------------------:|----------------------------:|------------:|
+| amd64   |                      5,260,800 |                   7,380,992 | +2,120,192  |
+| arm64   |                      4,783,104 |                   6,802,944 | +2,019,840  |
+| riscv64 |                      4,622,848 |                   6,564,352 | +1,941,504  |
+| loong64 |                      5,101,056 |                   7,212,544 | +2,111,488  |
+
+Delta is ~2.0 MiB per arch — dominated by `net/http` + `crypto/tls`
+re-references oras-go pulls (most of the TLS code is already in
+M6/M7) and the opencontainers image-spec types. The M6 (HTTPS-only)
+EFI is ~3.9 MiB on amd64 so the marginal cost of oras-go on top of
+what we already link is ~2 MiB, not the 4-5 MiB a pure new addition
+would have implied.
+
+**Functional parity verdict (host build + tamago build clean on
+all four arches):** TBD — pending live PASS confirmation on the
+arm64 / riscv64 / loong64 runners. The smoke probe is intentionally
+narrower than M7 (manifest fetch only; M7 walks index → manifest →
+config → layer) to minimise the test surface; expanding to a
+full-walk `oras.Copy` against a memory store is a follow-up if
+parity needs to be tightened.
+
+**RoundTripper line-count + complexity:**
+
+- `transport.go` — 484 LOC including BSD-3 header + doc comments.
+- `client.go` — 96 LOC.
+- Cyclomatic complexity: `RoundTrip` is the only non-trivial method
+  (URL parse → dial dispatch → write → pipe-bridged body). All
+  other helpers are <30 LOC linear flows.
+
+**What `net/http` did NOT need masking under TamaGo:** the M7.alt
+build succeeds with no GOOS=tamago patches to `net/http` —
+the stdlib `http.Client.Transport` plug-point is honoured cleanly
+and `net.Dial` is never called because the custom Transport short-
+circuits before the default transport's dialer fires.
+
+**Host-side coverage** (M7.alt addition):
+
+- `uefiboard/ministack/orasoci` package coverage 61.3%. Covered:
+  every parse / write / stream helper end-to-end (status line,
+  header parse error paths, content-length, identity, chunked,
+  chunked-bad-size, chunked-truncated), `splitHostPort` /
+  `defaultPort` / `toHTTPHeader` exhaustively, resolve()'s IP-
+  literal short-circuit + missing-DNS error branch, setDeadline's
+  unknown-conn branch, `NewRepository` wiring + bad-ref rejection,
+  `RoundTrip` scheme + nil-URL rejection. Not covered: the
+  RoundTrip dial-pipe-body integration (needs a fake Stack the
+  TCP4Conn type can plug into; deferred to the live runner). Gate
+  is documented at 60% pending fake-Stack infrastructure work.
+
+**Decision rule (post-M6.2):** if the PE compressor halves the
+binary penalty (so the delta drops from ~2 MiB to ~1 MiB), the
+oras-go path becomes preferable. If not, the hand-rolled M7 client
+stays. TBD line — user to fill in.
+
 ### M8.1 — Linux EFI-stub handover (deferred behind M6.1 + M7.1b)
 
 **Deliverable.** Memory map → ExitBootServices → jump to the loaded
