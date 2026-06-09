@@ -206,6 +206,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
 | M6.2 PR2    | **arm64/riscv64/loong64 GREEN 2026-06-09** (amd64 deferred → `m6-2-pr2-amd64-wip`) | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
 | **M6.2**    | **SHIPPED (3/4 arches) 2026-06-09; amd64 deferred** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3) |
+| M6.2 PR4    | **SHIPPED 2026-06-09 (host-side)**  | LZFSE codec wired in `efipack v0.2.0` + `pectl v0.3.0`; runtime stubs still flate-only (deferred) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
 | **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
@@ -1700,12 +1701,29 @@ Consolidated wins:
   on `m6-2-pr2-amd64-wip` (in-stub runtime crash).
 - **PR3 — `pectl pack` CLI + consolidated smoke matrix.**
   `pectl pack [-c flate|lzfse|lz4] [--level N] -o output.efi
-  input.efi` wraps `efipack.Pack` as a user-facing CLI. `lzfse`
-  and `lz4` surface `ErrCompressorNotImplemented` as a clean error
-  (M6.2 PR4 wires LZFSE via `go-compressions/lzfse v0.1.0`). New
-  `efipack:smoke:all` Taskfile target chains the per-arch smokes
-  and drops a Markdown matrix at `/tmp/efipack-smoke-matrix.md`.
-  Tags pushed: `go-coff/peln v0.3.0`, `go-coff/efipack v0.1.0`.
+  input.efi` wraps `efipack.Pack` as a user-facing CLI. `lz4`
+  surfaces `ErrCompressorNotImplemented` as a clean error; `lzfse`
+  was a clean error in PR3 and now (PR4) passes through with a
+  warning. New `efipack:smoke:all` Taskfile target chains the
+  per-arch smokes and drops a Markdown matrix at
+  `/tmp/efipack-smoke-matrix.md`.
+  Tags pushed: `go-coff/peln v0.3.0`, `go-coff/efipack v0.1.0`,
+  `go-coff/pectl v0.2.1`.
+- **PR4 — LZFSE codec wire-up (host-side).** `efipack.LZFSE` now
+  returns a real `bodyCodec` backed by
+  `github.com/go-compressions/lzfse v0.1.0` in `switchCompressor`;
+  `Options.Level` is ignored (LZFSE is single-mode). `pectl pack
+  -c lzfse` now succeeds and prints a WARNING that the embedded
+  per-arch runtime stub is still flate-only — a packed binary
+  produced with `-c lzfse` will NOT boot under firmware until
+  LZFSE-aware stubs ship (deferred follow-up). Smoke compare on
+  `cloud-boot/tamago-uefi/BOOTAA64-HTTP.EFI` (2.78 MiB input):
+  flate body 1 202 046 B (ratio 0.4124), lzfse body 1 199 068 B
+  (ratio 0.4114); body delta lzfse vs flate `-0.25 %`, packed
+  delta `-0.11 %` — marginal on this fixture, but the host-side
+  codec is now available for the deferred LZFSE-aware-stubs
+  sprint and for non-EFI callers (e.g. tart-oci layers). Tags
+  pushed: `go-coff/efipack v0.2.0`, `go-coff/pectl v0.3.0`.
 
 Final consolidated matrix (QEMU 9.2.0 + EDK2, `-netdev user`,
 sizes are `original on-disk → packed envelope on-disk`):
@@ -1727,12 +1745,19 @@ Deferred follow-ups:
   and not a wire-format defect. Block-IO instrumentation will let
   us print past the stub's first instructions on a hypervisor
   where ConOut is captured but pre-EBS faults silence it.
-- **M6.2 PR4 — LZFSE codec wire-up.** The `go-compressions/lzfse`
-  library already ships v0.1.0; PR4 plugs it into
-  `efipack/compressor.go` `switchCompressor` and stages an
-  alternative `.stub` blob with the LZFSE decompressor. Cost:
-  the stub grows by ~100-200 KiB; gain: ~1 ratio point over flate
-  on cloud-boot binaries.
+- **LZFSE-aware runtime stubs.** M6.2 PR4 wired LZFSE on the host
+  side (`efipack v0.2.0`, `pectl v0.3.0`) but the embedded per-arch
+  decompressor stubs under `go-coff/efipack/stub/blobs/<arch>.efi.bin`
+  are still flate-only. A packed binary produced with `-c lzfse`
+  has a structurally valid `.payload` (algo tag `LZFS`) that
+  round-trips on the host but will fault inside the stub on real
+  firmware because the stub doesn't know how to decode `LZFS`.
+  Follow-up: rebuild `cmd/efipackstub` with a `lzfse.Decompress`
+  path keyed on the `.payload` algo tag, regenerate the per-arch
+  blobs, and re-embed. Cost: ~100-200 KiB per stub binary; gain:
+  small (~0.25 % body, ~0.11 % packed on BOOTAA64-HTTP.EFI). Worth
+  doing primarily for symmetry with `tart-oci`-style LZFSE-native
+  inputs, not for cloud-boot size wins on its own.
 
 ### M7 — OCI registry client — SHIPPED 2026-06-08
 
