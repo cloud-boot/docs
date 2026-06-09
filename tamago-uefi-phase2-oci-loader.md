@@ -203,7 +203,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M5          | done 2026-06-08                     | DNS + HTTP GET                                             |
 | M6          | done 2026-06-08                     | TLS + HTTPS GET (PE>4 MiB amd64 deferred as M6.1)          |
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
-| M6.2        | queued                              | real PE compressor: `go-compressions/*` + `go-coff/efipack`|
+| M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
 | **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
@@ -1507,6 +1507,126 @@ StartImage. Full amd64 fix requires either:
   leverage, slowest path).
 
 Tracked as **M6.2** in the milestone queue.
+
+#### M6.2 de-risk — chained LoadImage threshold sweep (2026-06-09)
+
+Before committing to the full `go-compressions` + `go-coff/efipack`
+implementation, we ran a focused experiment to validate the M6.2
+premise: *if* we build a PE32+ compressor with a tiny self-extracting
+stub, will the stub itself trip the CpuDxe.dll +0x110C #GP on amd64
+OVMF the same way the M8.0 chained TamaGo payload does, or does the
+firmware accept small clean PE32+ images cleanly?
+
+A new probe (`phase2_efi_tiny_handover`,
+`internal/embed_chained_tiny`, parent EFI `BOOTX64-EFITINY.EFI`,
+live runner `internal/liveefitinyhandover/run.sh`) embeds five
+variants into a single parent and exercises gBS->LoadImage +
+StartImage on each:
+
+- `chainedtinyC` — TamaGo PIE at the runtime floor, ~1.7 MiB.
+  Imports `uefiboard` for cpuinit/ramStart but has an empty `main()`.
+  Probe calls LoadImage only (child halts in TamaGo's spin-loop with
+  no `WireExitToFirmware`, so StartImage would never return — that's
+  fine; we only need the LoadImage signal at this size).
+- `chainedtinyZ`    — hand-rolled minimal PE32+, 1024 B
+  (`xor eax,eax; ret`).
+- `chainedtinyZ64K` — same generator, padded `.text` to 64 KiB.
+- `chainedtinyZ1M`  — same, padded to 1 MiB.
+- `chainedtinyZ2M`  — same, padded to 2 MiB.
+
+The Z* variants are produced by `cmd/chainedtinyZgen` — a small
+pure-Go PE32+ generator (one .text section, Magic=0x20b,
+Subsystem=10 EFI_APPLICATION, no relocations, no debug dir). They
+are valid EFI_APPLICATION images that LoadImage accepts and
+StartImage runs end-to-end; the entry returns EFI_SUCCESS (0)
+through gBS->StartImage's return path.
+
+Variants `chainedtinyA` and `chainedtinyB` exist in source
+(`cmd/chainedtinyA`, `cmd/chainedtinyB`) but are intentionally NOT
+embedded into the amd64 parent — measurement showed all three
+TamaGo variants land within 600 bytes of each other (~1.7 MiB EFI),
+so embedding all three would just push the *parent* over the M6.1
+threshold and we'd fail to load the parent before the experiment
+ran. C alone is the canonical "TamaGo floor" datapoint.
+
+**Results (amd64 OVMF, edk2-stable202408, pkgx qemu 9.2.0,
+2026-06-09):**
+
+| variant       | size (bytes) | LoadImage | StartImage           | amd64 result |
+|---------------|-------------:|-----------|----------------------|--------------|
+| M8.0 chainedhello (existing) | 1,702,400 | OK        | **#GP at CpuDxe.dll +0x110C** | **FAIL** |
+| chainedtinyC  |    1,700,864 | OK        | skipped (no Exit hook in child) | **PASS** (LoadImage only) |
+| chainedtinyZ2M |    2,097,152 | OK        | returned exit_status=0x0 | **PASS** |
+| chainedtinyZ1M |    1,048,576 | OK        | returned exit_status=0x0 | **PASS** |
+| chainedtinyZ64K |       65,536 | OK        | returned exit_status=0x0 | **PASS** |
+| chainedtinyZ  |        1,024 | OK        | returned exit_status=0x0 | **PASS** |
+
+No `X64 Exception Type - 0D(#GP)` block in the M6.2 QEMU log;
+M8.0 in the same OVMF / same QEMU command still produces the
+same #GP block at `CpuDxe.dll +0x110C` (re-verified in the same
+session — the bug has not gone away in the firmware, it just
+doesn't fire on minimal PE images).
+
+**Findings.**
+
+1. **The CpuPageTableLib bug is NOT a raw byte-size threshold.**
+   A 2 MiB hand-rolled PE32+ loads AND runs cleanly; the 1.7 MiB
+   TamaGo chainedhello loads then #GPs at StartImage. The size
+   axis alone doesn't predict the bug.
+2. **The bug is at gBS->StartImage, not gBS->LoadImage** —
+   re-reading the M8.0 log carefully shows `LoadImage OK` followed
+   by the #GP immediately after `StartImage entering child`. The
+   M8.0 design-doc framing of "M6.1 = LoadImage threshold" was
+   imprecise; the page-table walk that #GPs happens during the
+   image-mapping work the firmware does *between* LoadImage's
+   allocation phase and the actual jump to the child's entry.
+3. **The bug correlates with PE32+ structural complexity, not
+   size.** The TamaGo binary has many sections, .reloc / .pdata /
+   .xdata / many small COFF sections, and the pectl-emitted PE
+   layout the firmware page-table walker can't handle. The
+   hand-rolled single-section PE32+ does not trip it at any tested
+   size up to 2 MiB.
+4. **M6.2 IS VIABLE for amd64.** A compressor stub that wraps the
+   decompressed image as opaque data (NOT as additional PE
+   sections handed back to the firmware) avoids the bug
+   regardless of the underlying compressed payload size. The
+   minimal-PE32+ stub itself is provably safe.
+
+**Verdict: M6.2 viable for amd64.** The `go-coff/efipack` design
+should:
+
+- Emit a hand-rolled single-`.text`-section PE32+ stub (the same
+  shape as `chainedtinyZgen`'s output) rather than letting a
+  toolchain like `pectl link-pie` produce a multi-section PE for
+  the stub.
+- Carry the decompressed payload as raw bytes in the stub's data
+  region (or appended past the PE for the stub to mmap). The stub
+  decompresses, then itself does gBS->LoadImage + StartImage of
+  the *decompressed* image — at which point the original PE
+  shape's compatibility with the firmware is what determines
+  whether the inner StartImage succeeds. (This is the same bug
+  the inner image would hit by being firmware-loaded directly, so
+  M6.2 doesn't *fix* the firmware bug — it just buys the
+  compressor headroom to land arbitrarily-large compressed
+  payloads without growing the stub.)
+- For Linux EFI-stub / vmlinuz handover specifically, the
+  decompressed payload IS a Linux EFI stub which is single-section
+  enough that it likely escapes the bug — to be confirmed in M8.1
+  once a real EFI stub kernel is on hand.
+
+Follow-ups:
+
+- Bisect the structural trigger (sections, relocs, debug dir, …)
+  by stripping the M8.0 chainedhello PE one COFF feature at a time
+  and re-running. Could provide a `pectl strip` mode that
+  outputs a single-section repacked PE that the firmware accepts.
+- Repeat the sweep on a current EDK2 `master` build to see if the
+  CpuPageTableLib bug has been fixed upstream since `stable202408`.
+
+The full M6.2 compressor implementation lives in a separate repo
+(`go-coff/efipack`); the de-risk experiment lives entirely in
+`cloud-boot/tamago-uefi` and is preserved for regression testing.
+Re-run with `task efitiny:live:amd64`.
 
 riscv64 was deferred in M5 due to a separate timing bug; that bug
 is asymptomatic at the M6 boundary (the inline-pump pattern from M3
