@@ -1,0 +1,77 @@
+From 867fad874a019b629ee55aff2b0ef9af0fe1358c Mon Sep 17 00:00:00 2001
+From: Oliver Smith-Denny <osde@microsoft.com>
+Date: Wed, 30 Apr 2025 13:02:27 -0700
+Subject: [PATCH] MdeModulePkg: Fix Image Memory Protection Applying
+
+Commit 5ccb5fff02a66b21898bd57f48bbd7c3cd6f4e8d updated the
+image memory protection code to set the protection
+attributes through the GCD instead of directly to the page
+table. However, this code had an implicit assumption that
+each base address passed to it was the beginning of a GCD
+descriptor. On the virtual platforms tested, this was the case.
+However, on a physical platform, a scenario was encountered
+where the base address was not the beginning of a GCD
+descriptor, thus causing memory attributes to be applied
+incorrectly.
+
+This assumption does not need to be made and this patch
+updates the code to handle the case where the base address
+is not the beginning of a GCD descriptor.
+
+Signed-off-by: Oliver Smith-Denny <osde@microsoft.com>
+---
+ MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c | 21 ++++++++++++-------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+index 72d72f9d93..33357eb124 100644
+--- a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
++++ b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+@@ -196,8 +196,11 @@ SetUefiImageMemoryAttributes (
+   UINT64                           FinalAttributes;
+   UINT64                           CurrentAddress;
+   UINT64                           CurrentLength;
++  UINT64                           ImageEnd;
++  UINT64                           DescEnd;
+ 
+   CurrentAddress = BaseAddress;
++  ImageEnd       = BaseAddress + Length;
+ 
+   // we loop here because we may have multiple memory space descriptors that overlap the requested range
+   // this will definitely be the case for unprotecting an image, because that calls this function for the entire image,
+@@ -216,11 +219,14 @@ SetUefiImageMemoryAttributes (
+       return;
+     }
+ 
+-    // ensure that we only change the attributes for the range that we are interested in, not the entire descriptor
+-    if (BaseAddress + Length > CurrentAddress + Descriptor.Length) {
+-      CurrentLength = Descriptor.Length;
++    DescEnd = Descriptor.BaseAddress + Descriptor.Length;
++
++    // ensure that we only change the attributes for the range that we are interested in, not the entire descriptor, we
++    // may also be in the middle of a descriptor, so ensure our length is not larger than the descriptor length
++    if (ImageEnd > DescEnd) {
++      CurrentLength = DescEnd - CurrentAddress;
+     } else {
+-      CurrentLength = BaseAddress + Length - CurrentAddress;
++      CurrentLength = ImageEnd - CurrentAddress;
+     }
+ 
+     // Preserve the existing caching and virtual attributes, but remove the hardware access bits
+@@ -291,10 +297,9 @@ SetUefiImageMemoryAttributes (
+       }
+     }
+ 
+-    // we have CurrentLength, also, but that is just to handle the final descriptor case where we might take only
+-    // part of a descriptor, so we can use Descriptor.Length here to move to the next descriptor, which for the final
+-    // descriptor will exit the loop, regardless of whether we truncated or not
+-    CurrentAddress += Descriptor.Length;
++    // we may have started in the middle of a descriptor, so we need to move to the beginning of the next descriptor,
++    // or the end of the image, whichever is smaller
++    CurrentAddress += CurrentLength;
+   }
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

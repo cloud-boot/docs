@@ -1,0 +1,183 @@
+From 5ccb5fff02a66b21898bd57f48bbd7c3cd6f4e8d Mon Sep 17 00:00:00 2001
+From: Oliver Smith-Denny <osde@microsoft.com>
+Date: Tue, 15 Apr 2025 15:07:51 -0700
+Subject: [PATCH] MdeModulePkg: DxeCore: Set Image Protections Through GCD
+
+Today, SetUefiImageMemoryAttributes calls directly to the
+CPU Arch protocol to set EFI_MEMORY_XP or EFI_MEMORY_RO on
+image memory. However, this bypasses the GCD and so the GCD
+is out of sync with the actual state of memory.
+
+This can cause an issue in the scenario where a new attribute
+is being set (whether a virtual attribute or a real HW attribute),
+if the GCD attributes are queried for a region and the new attribute
+is appended to the existing GCD attributes (which are incorrect),
+then the incorrect attributes can get applied. This can result in
+setting EFI_MEMORY_XP on code sections of images and causing an
+execution fault.
+
+This patch updates SetUefiImageMemoryAttributes to call into the
+GCD to update the attributes there and let the GCD code call into
+the CPU Arch protocol to update the page table.
+
+Signed-off-by: Oliver Smith-Denny <osde@microsoft.com>
+---
+ MdeModulePkg/Core/Dxe/Gcd/Gcd.c               |   2 +-
+ MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c | 117 +++++++++++++++++-
+ 2 files changed, 112 insertions(+), 7 deletions(-)
+
+diff --git a/MdeModulePkg/Core/Dxe/Gcd/Gcd.c b/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
+index df0765b493..467d5e4813 100644
+--- a/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
++++ b/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
+@@ -976,7 +976,7 @@ CoreConvertSpace (
+       // Set attributes operation
+       //
+       case GCD_SET_ATTRIBUTES_MEMORY_OPERATION:
+-        if (CpuArchAttributes == 0) {
++        if ((CpuArchAttributes == 0) && (Attributes != 0)) {
+           //
+           // Keep original CPU arch attributes when caller just calls
+           // SetMemorySpaceAttributes() with none CPU arch attributes (for example, RUNTIME).
+diff --git a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+index 9639333be0..72d72f9d93 100644
+--- a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
++++ b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+@@ -194,16 +194,108 @@ SetUefiImageMemoryAttributes (
+   EFI_STATUS                       Status;
+   EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Descriptor;
+   UINT64                           FinalAttributes;
++  UINT64                           CurrentAddress;
++  UINT64                           CurrentLength;
+ 
+-  Status = CoreGetMemorySpaceDescriptor (BaseAddress, &Descriptor);
+-  ASSERT_EFI_ERROR (Status);
++  CurrentAddress = BaseAddress;
++
++  // we loop here because we may have multiple memory space descriptors that overlap the requested range
++  // this will definitely be the case for unprotecting an image, because that calls this function for the entire image,
++  // which we split into different GCD descriptors when we protected it.
++  while (CurrentAddress < BaseAddress + Length) {
++    Status = CoreGetMemorySpaceDescriptor (CurrentAddress, &Descriptor);
++    if (EFI_ERROR (Status)) {
++      DEBUG ((
++        DEBUG_ERROR,
++        "%a - Failed to get memory space descriptor for address %llx with status %r. Cannot protect image.\n",
++        __func__,
++        CurrentAddress,
++        Status
++        ));
++      ASSERT_EFI_ERROR (Status);
++      return;
++    }
++
++    // ensure that we only change the attributes for the range that we are interested in, not the entire descriptor
++    if (BaseAddress + Length > CurrentAddress + Descriptor.Length) {
++      CurrentLength = Descriptor.Length;
++    } else {
++      CurrentLength = BaseAddress + Length - CurrentAddress;
++    }
++
++    // Preserve the existing caching and virtual attributes, but remove the hardware access bits
++    FinalAttributes = (Descriptor.Attributes & ~EFI_MEMORY_ACCESS_MASK) | (Attributes & EFI_MEMORY_ATTRIBUTE_MASK);
+ 
+-  FinalAttributes = (Descriptor.Attributes & EFI_CACHE_ATTRIBUTE_MASK) | (Attributes & EFI_MEMORY_ATTRIBUTE_MASK);
++    DEBUG ((DEBUG_VERBOSE, "SetUefiImageMemoryAttributes - 0x%016lx - 0x%016lx (0x%016lx)\n", CurrentAddress, CurrentLength, FinalAttributes));
+ 
+-  DEBUG ((DEBUG_VERBOSE, "SetUefiImageMemoryAttributes - 0x%016lx - 0x%016lx (0x%016lx)\n", BaseAddress, Length, FinalAttributes));
++    // check to see if the capabilities support the attributes we want to set. If not, set the capabilities appropriately
++    if ((Descriptor.Capabilities & FinalAttributes) != FinalAttributes) {
++      Status = CoreSetMemorySpaceCapabilities (
++                 CurrentAddress,
++                 CurrentLength,
++                 Descriptor.Capabilities | FinalAttributes
++                 );
+ 
+-  ASSERT (gCpu != NULL);
+-  gCpu->SetMemoryAttributes (gCpu, BaseAddress, Length, FinalAttributes);
++      // if we failed to set the capabilities, we should try to continue, it is possible we could succeed
++      if (EFI_ERROR (Status)) {
++        DEBUG ((
++          DEBUG_ERROR,
++          "%a failed setting capabilities on %llx of length %llx with capabilities %llx - %r\n",
++          __func__,
++          CurrentAddress,
++          CurrentLength,
++          Descriptor.Capabilities | FinalAttributes,
++          Status
++          ));
++        ASSERT_EFI_ERROR (Status);
++      }
++    }
++
++    // Call into the GCD to update the attributes there. It will call into the CPU Arch protocol to update the
++    // page table attributes
++    Status = CoreSetMemorySpaceAttributes (
++               CurrentAddress,
++               CurrentLength,
++               FinalAttributes
++               );
++
++    if (EFI_ERROR (Status)) {
++      DEBUG ((
++        DEBUG_ERROR,
++        "%a failed on %llx of length %llx with attributes %llx - %r\n",
++        __func__,
++        CurrentAddress,
++        CurrentLength,
++        FinalAttributes,
++        Status
++        ));
++      ASSERT_EFI_ERROR (Status);
++    }
++
++    if (((FinalAttributes & (EFI_MEMORY_ATTRIBUTE_MASK | EFI_CACHE_ATTRIBUTE_MASK)) == 0) && (gCpu != NULL)) {
++      // if the passed hardware attributes are 0, CoreSetMemorySpaceAttributes() will not call into the CPU Arch protocol
++      // to set the attributes, so we need to do it manually here. This can be the case when we are unprotecting an
++      // image if no caching attributes are set. If gCpu has not been populated yet, we'll still have updated the GCD
++      // descriptor and we should sync the attributes with the CPU Arch protocol when it is available.
++      Status = gCpu->SetMemoryAttributes (gCpu, CurrentAddress, CurrentLength, 0);
++      if (EFI_ERROR (Status)) {
++        DEBUG ((
++          DEBUG_ERROR,
++          "%a failed to update page table for %llx of length %llx with attributes 0 - %r\n",
++          __func__,
++          CurrentAddress,
++          CurrentLength,
++          Status
++          ));
++        ASSERT_EFI_ERROR (Status);
++      }
++    }
++
++    // we have CurrentLength, also, but that is just to handle the final descriptor case where we might take only
++    // part of a descriptor, so we can use Descriptor.Length here to move to the next descriptor, which for the final
++    // descriptor will exit the loop, regardless of whether we truncated or not
++    CurrentAddress += Descriptor.Length;
++  }
+ }
+ 
+ /**
+@@ -371,6 +463,19 @@ ProtectUefiImage (
+ 
+   if (EFI_ERROR (Status)) {
+     DEBUG ((DEBUG_ERROR, "%a failed to create image properties record\n", __func__));
++
++    // if we failed to create the image properties record, this may mean that the image is not aligned properly
++    // the GCD will believe that this memory is non-executable, because the NX initialization routine doesn't know what
++    // memory is image memory or not, even though the page table has the correct attributes, so we need to set the
++    // attributes here to RWX so that future updates to the GCD do not apply the NX attributes to this memory in the
++    // page table (as can happen when applying virtual attributes). This may have the side effect of marking other
++    // memory as RWX, since this image may not be page aligned, but that is safe to do, it may just remove some
++    // page protections, but it already has to to execute this image.
++    SetUefiImageMemoryAttributes (
++      (UINT64)(UINTN)LoadedImage->ImageBase & ~EFI_PAGE_MASK,
++      (LoadedImage->ImageSize + EFI_PAGE_MASK) & ~EFI_PAGE_MASK,
++      0
++      );
+     FreePool (ImageRecord);
+     goto Finish;
+   }
+-- 
+2.50.1 (Apple Git-155)
+

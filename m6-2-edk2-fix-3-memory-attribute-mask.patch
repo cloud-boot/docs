@@ -1,0 +1,74 @@
+From b5bab75e58bf8c9ec66243a62b86d5f6b409a69a Mon Sep 17 00:00:00 2001
+From: Oliver Smith-Denny <osde@microsoft.com>
+Date: Thu, 25 Sep 2025 11:08:22 -0700
+Subject: [PATCH] MdeModulePkg: DXE Core: Correct Usage of
+ EFI_MEMORY_ATTRIBUTE_MASK
+
+edk2 commit 3bd5c994c879f78e8e3d5346dc3b627f199291aa added usage
+of EFI_MEMORY_ATTRIBUTE_MASK to edk2. However, it applied it
+incorrectly to some places that should instead use
+EFI_MEMORY_ACCESS_MASK. EFI_MEMORY_ACCESS_MASK contains the actual
+HW page table access attributes (read protect, read only, no-execute),
+whereas EFI_MEMORY_ATTRIBUTE_MASK contains the access attributes in
+addition to some virtual attributes (special purpose and cpu crypto).
+
+The GCD has a behavior where if SetMemorySpaceAttributes() is called
+with only virtual attributes set, it will not call into CpuDxe to
+change the attributes; 0 is a valid page table attribute set (it means
+RWX). However, after the above change, this behavior was altered so
+that if EFI_MEMORY_SP or EFI_MEMORY_CPU_CRYPTO is applied, in attempt
+to just update these virtual attributes, the GCD will call into CpuDxe
+and apply RWX instead, which is not the intention of the caller.
+
+One other place this was done incorrectly was in CoreGetMemoryMap,
+but that was fixed in f1567720b13a578ffa54716119f826df622babcd.
+
+SetUefiImageMemoryAttributes() is also updated here because that
+logic was copied from the check the GCD has about whether to call
+CpuDxe or not. Now that the GCD has been corrected, this also
+needs to be corrected.
+
+Signed-off-by: Oliver Smith-Denny <osde@microsoft.com>
+---
+ MdeModulePkg/Core/Dxe/Gcd/Gcd.c               | 4 ++--
+ MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/MdeModulePkg/Core/Dxe/Gcd/Gcd.c b/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
+index f5cac1874a..42ec2618df 100644
+--- a/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
++++ b/MdeModulePkg/Core/Dxe/Gcd/Gcd.c
+@@ -692,7 +692,7 @@ ConverToCpuArchAttributes (
+ {
+   UINT64  CpuArchAttributes;
+ 
+-  CpuArchAttributes = Attributes & EFI_MEMORY_ATTRIBUTE_MASK;
++  CpuArchAttributes = Attributes & EFI_MEMORY_ACCESS_MASK;
+ 
+   if ((Attributes & EFI_MEMORY_UC) == EFI_MEMORY_UC) {
+     CpuArchAttributes |= EFI_MEMORY_UC;
+@@ -995,7 +995,7 @@ CoreConvertSpace (
+           // Keep original CPU arch attributes when caller just calls
+           // SetMemorySpaceAttributes() with none CPU arch attributes (for example, RUNTIME).
+           //
+-          Attributes |= (Entry->Attributes & (EFI_CACHE_ATTRIBUTE_MASK | EFI_MEMORY_ATTRIBUTE_MASK));
++          Attributes |= (Entry->Attributes & (EFI_CACHE_ATTRIBUTE_MASK | EFI_MEMORY_ACCESS_MASK));
+         }
+ 
+         Entry->Attributes = Attributes;
+diff --git a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+index 69d26cb2b3..b12047d7ad 100644
+--- a/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
++++ b/MdeModulePkg/Core/Dxe/Misc/MemoryProtection.c
+@@ -281,7 +281,7 @@ SetUefiImageMemoryAttributes (
+       ASSERT_EFI_ERROR (Status);
+     }
+ 
+-    if (((FinalAttributes & (EFI_MEMORY_ATTRIBUTE_MASK | EFI_CACHE_ATTRIBUTE_MASK)) == 0) && (gCpu != NULL)) {
++    if (((FinalAttributes & (EFI_MEMORY_ACCESS_MASK | EFI_CACHE_ATTRIBUTE_MASK)) == 0) && (gCpu != NULL)) {
+       // if the passed hardware attributes are 0, CoreSetMemorySpaceAttributes() will not call into the CPU Arch protocol
+       // to set the attributes, so we need to do it manually here. This can be the case when we are unprotecting an
+       // image if no caching attributes are set. If gCpu has not been populated yet, we'll still have updated the GCD
+-- 
+2.50.1 (Apple Git-155)
+
