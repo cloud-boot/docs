@@ -209,7 +209,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.2 PR4    | **SHIPPED 2026-06-09 (host-side)**  | LZFSE codec wired in `efipack v0.2.0` + `pectl v0.3.0`; runtime stubs still flate-only (deferred) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
-| **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
+| **M7.1b**   | **done 2026-06-09 (cosign SHIPPED + real-image verified)** | **keyed cosign ECDSA-P256 signature verification (self-test + arm64 live real-image PASS against ttl.sh)** |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
@@ -2098,7 +2098,7 @@ signer's public key.
     different payload via injection.
   - `(*CosignVerifier).Verify(reg, ref, manifestDigest)` — fetches
     the `.sig` artifact via `reg.FetchManifestRaw(tag)`, walks each
-    layer, base64-decodes the `dev.sigstore.cosign/v1/signature`
+    layer, base64-decodes the `dev.cosignproject.cosign/signature`
     annotation, and `ecdsa.VerifyASN1`-verifies it against
     `sha256(CanonicalPayload(ref.Host+"/"+ref.Repo, manifestDigest))`.
     First passing layer returns nil; all-fail returns
@@ -2137,13 +2137,53 @@ signer's public key.
 | riscv64 | PASS   | 120 s | pubkey OK; happy Verify OK; tampered rejected; lease acquired; embedded roots = 8; COSIGN OK       |
 | loong64 | PASS   | 120 s | pubkey OK; happy Verify OK; tampered rejected; lease acquired; embedded roots = 8; COSIGN OK       |
 
-**Why self-test mode (not a real signed image) in this commit:** the
-canonical M7.1b candidate (`ghcr.io/sigstore/cosign/cosign:v2.4.0`) is
-signed KEYLESSLY (Fulcio + Rekor), which is out of M7.1b scope. The
-self-test path proves the verifier end-to-end against a real ECDSA
-signature; wiring the real-image branch against a keyed-cosign-signed
-public image (e.g. one we sign and publish from cloud-boot) is queued
-as a tiny follow-up — flip two constants, no code change.
+**Live results (real-image mode — 2026-06-09):**
+
+| arch  | result | wall  | image                                          | anchors                                                                                                |
+|-------|--------|-------|------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| arm64 | PASS   | ~80 s | `ttl.sh/cloudboot-m71b-v2-1781034429:24h`      | MODE = real-image; lease acquired; embedded roots = 8; manifest digest = sha256:5099...23e; COSIGN OK  |
+
+The arm64 live run exercised the FULL real-image path end-to-end:
+virtio-net up → DHCPv4 → DNS resolve `ttl.sh` → TLS handshake against
+embedded LE roots → HTTPS GET v2 manifest → SHA-256 manifest digest
+locally → HTTPS GET `sha256-<hex>.sig` manifest → ECDSA-P256 verify
+of the layer-annotation signature against the embedded pubkey →
+`COSIGN OK`. This is the first cosign verify in the cloud-boot stack
+against an image NOT signed in-VM.
+
+**Bug found + fixed while wiring real-image mode:** the cosign
+signature-annotation constant was `dev.sigstore.cosign/v1/signature`,
+but the canonical key per the cosign `SIGNATURE_SPEC.md` is
+`dev.cosignproject.cosign/signature` — what every real cosign-signed
+image carries. The self-test was incidentally passing because the
+selftest transport emitted whatever annotation key the verifier
+expected; both sides were wrong-but-consistent. The first real-image
+attempt surfaced this; constant + comments + docs corrected, all
+host tests + self-test live runs re-pass.
+
+**Why the real-image image isn't pinned as the committed default:**
+no durable public registry currently hosts a keyed-cosign-signed
+image with a publicly-known static ECDSA P-256 pubkey:
+
+- distroless (`gcr.io/distroless/*`) ships a static `cosign.pub` in
+  its repo but migrated to KEYLESS Fulcio+Rekor signatures; the
+  documented key no longer verifies any current image (re-tested
+  2026-06-09).
+- Rancher's Application Collection pubkey
+  (`https://apps.rancher.io/ap-pubkey.pem`) is RSA-2048; our verifier
+  is keyed-only ECDSA-P256, so the algorithm is incompatible.
+- Kubernetes, cosign-the-tool, sigstore-the-project: all keyless.
+
+We therefore publish a fresh ECDSA-P256-signed test image to `ttl.sh`
+(anonymous, max 24h TTL) using cosign v2 (legacy
+`vnd.dev.cosign.simplesigning.v1+json` format — cosign v3 switched to
+`vnd.sigstore.bundle` which this verifier does not parse) for the
+one-shot live verification above. The plumbing script
+`internal/livecosign/run-real-image.sh` generates a fresh keypair,
+publishes, signs, patches the constants in place, rebuilds, runs the
+live probe, and restores the constants. Pinning a durable
+real-image+pubkey pair is queued for when we have `write:packages`
+PAT to publish under `ghcr.io/cloud-boot/*`.
 
 **Why not Ed25519?** Cosign's keyed-mode wire format supports ECDSA
 P-256 and Ed25519. We ship ECDSA P-256 only because (a) it matches
