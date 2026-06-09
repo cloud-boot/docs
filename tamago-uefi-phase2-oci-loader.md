@@ -214,6 +214,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **SHIPPED arm64 (live kernel boot) 2026-06-09** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..." (R-M8.3a/b CLOSED)** |
+| **M8.4**    | **SHIPPED arm64 (DTB probe + initrd publish wired) 2026-06-09** | **ConfigurationTable DTB probe + PublishInitrd in MODE C; EFI-stub locates initrd handle + invokes LoadFile2 (kernel logs "Failed to load initrd!" — trampoline interop gap documented as R-M8.4a)** |
 
 ### M0 — Probe + type surface (done)
 
@@ -2765,6 +2766,163 @@ cmdline plus per-arch live-runner branch would be required.
   the synchronous extract.
 - `internal/livekernelboot/run.sh` — arm64 branch with `-netdev user`
   + `-device virtio-net-pci` and MODE-C-specific PASS gate.
+
+### M8.4 — DTB ConfigurationTable probe + initrd publish in MODE C (SHIPPED arm64 wiring 2026-06-09)
+
+Closes the M8.3 follow-up gaps: (1) a `gST->ConfigurationTable` walk
+that reports whether the firmware already publishes a flattened
+Device Tree Blob (the Linux EFI-stub auto-locates one via
+`EFI_DTB_TABLE_GUID = b1b621d5-f19c-41a5-830b-d9152c69aae0`); and
+(2) a real call to `uefiboard.PublishInitrd` in MODE C so the
+EFI-stub finds an initrd at `LINUX_EFI_INITRD_MEDIA_GUID`.
+
+**Initrd source**: did NOT find a publicly-pullable Talos initramfs
+OCI ref (siderolabs publishes only the multi-layer `installer`
+aggregate; `ghcr.io/siderolabs/initramfs*` repos all return
+`DENIED`). Fell back to an embedded 260-byte minimal cpio.gz
+(`internal/embed_initramfs/`) — a single `/init` script that prints
+a marker and exits. The OCI streaming path (`fetchInitrdFromOCI`)
+is still wired up and ready: setting `kernelBootInitrdRef` to a
+public initramfs ref will exercise it. The gzip-auto-detect
+(`1f 8b 08` magic) handles both compressed and raw cpio layers.
+
+**DTB probe result (QEMU virt + EDK2 stable202408 `-bios edk2-aarch64-code.fd`)**:
+
+```
+phase2-oci-kernel-boot: DTB probe: SystemTable.NumberOfTableEntries = 8
+phase2-oci-kernel-boot: DTB probe: EFI_DTB_TABLE_GUID NOT FOUND — kernel will fall back to 'Generating empty DTB'
+```
+
+EDK2 stable202408 on aarch64 QEMU `virt` does NOT publish the DTB
+via `gBS->InstallConfigurationTable` under our run mode (the OVMF
+`-bios` build path does not embed `ArmVirtPkg`'s `PlatformDxe`
+copying-the-QEMU-DTB step). Publishing a DTB ourselves would need
+the QEMU `-dtb /path/to/virt.dtb` flag plumbing (dev-mode
+`-machine virt,dumpdtb=…` to grab one first) — out of M8.4 scope.
+The kernel proceeds anyway via its "Generating empty DTB" fallback,
+which is sufficient on platforms whose UEFI runtime services cover
+the missing devicetree bits.
+
+**Live result** (`task kernelboot:live:arm64`, M8.4):
+
+```
+phase2-oci-kernel-boot: M8.2 -- streaming OCI fetch + LoadImage + StartImage + Linux kernel helpers
+phase2-oci-kernel-boot: arch = arm64
+phase2-oci-kernel-boot: MODE = C (real-registry + Linux kernel helpers)
+phase2-oci-kernel-boot: target = https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc
+phase2-oci-kernel-boot: cmdline = console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200
+phase2-oci-kernel-boot: initrd = (embedded minimal cpio.gz)
+[...DHCP + HTTPS + OCI walk + vmlinuz extract...]
+phase2-oci-kernel-boot: LoadImage OK, handle = 0x13e8bdd98
+phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len = 49
+phase2-oci-kernel-boot: DTB probe: SystemTable.NumberOfTableEntries = 8
+phase2-oci-kernel-boot: DTB probe: EFI_DTB_TABLE_GUID NOT FOUND — kernel will fall back to 'Generating empty DTB'
+phase2-oci-kernel-boot: using embedded minimal initrd; bytes = 260
+phase2-oci-kernel-boot: embedded initrd magic = 1f 8b 08 (gzip)
+phase2-oci-kernel-boot: PublishInitrd OK, initrd handle = 0x13e8bee18
+phase2-oci-kernel-boot: StartImage entering EFI-stub kernel
+phase2-oci-kernel-boot: ---- kernel-side output below this line ----
+EFI stub: Booting Linux Kernel...
+EFI stub: ERROR: efi_get_random_bytes() failed (0x8000000000000002), KASLR will be disabled
+EFI stub: Generating empty DTB
+EFI stub: ERROR: Failed to load initrd!
+```
+
+**Progress vs. M8.3**: kernel EFI-stub now prints **four** stub
+lines (was three) — the `Failed to load initrd!` line is new and
+proves the EFI-stub successfully:
+1. Located our `EFI_LOAD_FILE2_PROTOCOL` handle via
+   `LocateDevicePath(LINUX_EFI_INITRD_MEDIA_GUID)`.
+2. Opened the protocol via `HandleProtocol`.
+3. Invoked our `LoadFile2->LoadFile` callback at least once (the
+   stub would have silently fallen back to cmdline `initrd=` if
+   the handle wasn't found, NOT printed `Failed to load initrd!`).
+
+What we don't yet get: the `Unpacking initramfs...` line that
+would come from a successful initrd transfer. The Go-side
+`loadFileGo` returns the right EFI_STATUS shapes per the host
+unit tests, so the gap is in the firmware→Go callback interop —
+see R-M8.4a below.
+
+PASS green on the framework wiring (DTB probe walker + initrd
+publish + protocol install) on 2026-06-09. The trampoline
+interop gap is a known follow-up.
+
+**R-M8.4a — EFI-stub `Failed to load initrd!` despite successful PublishInitrd (OPEN)**:
+
+Symptom: the kernel EFI-stub locates our published
+`EFI_LOAD_FILE2_PROTOCOL` handle correctly, calls into our
+per-arch `loadFile_trampoline` (the asm bridge from AAPCS64 →
+Go ABI0 → `loadFileGo`), but the stub then logs
+`EFI stub: ERROR: Failed to load initrd!` rather than the
+expected `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device
+path` success line.
+
+Hypothesised root cause (not yet root-caused): one of the
+following inside the firmware→Go callback path:
+
+1. `loadFileGo` returns `EFI_BUFFER_TOO_SMALL` on the size-query
+   call as expected, but the stub then makes the second
+   (transfer) call with `*BufferSize` smaller than `need`, and we
+   re-return `EFI_BUFFER_TOO_SMALL` instead of `EFI_SUCCESS` —
+   testable by adding a print of `(have, need)` from the
+   trampoline once a print-from-nosplit path exists.
+2. The Go runtime's `g` register (X28 on arm64) is in an
+   undefined state on entry because the EFI-stub clobbered it
+   between our `StartImage` and the callback — the trampoline
+   does not currently restore `g` from a saved location, and the
+   `loadFileGo` body's `unsafe.Slice` / write-barrier-eligible
+   paths would then read wild memory. The host-side
+   `loadFileGo` tests in `initrd_protocol_test.go` exercise the
+   pure logic under a known-good `g`; the live firmware path
+   does not.
+3. The `loadFileRegistry` lookup by `this` fails because the
+   firmware passes a re-relocated copy of our protocol struct
+   (UEFI is allowed to copy by value in some implementations
+   when handing the interface back to a caller). Detectable by
+   logging both pointers and seeing whether equality holds.
+
+Mitigation paths, in priority order:
+- Add a "loadFile entered" sentinel via a dedicated nosplit
+  print that writes a single byte to ConOut from inside the
+  callback (ConOut survives StartImage on EDK2 + QEMU virt
+  pre-EBS).
+- Restructure the trampoline to save+restore `g` (X28) explicitly,
+  matching the eficall_arm64.s discipline.
+- Cross-check against EDK2's stable202408 `LoadFile2` reference
+  implementation in `MdeModulePkg/Library/UefiLibFwVol`.
+
+Workaround in the meantime: same as M8.3 — the kernel proceeds
+past the `Failed to load initrd!` log without halting, then
+data-aborts later in its own DTB-less init code. The MODE C
+framework wiring (DTB probe + PublishInitrd + protocol install +
+EFI-stub locate-and-invoke handshake) is proven; only the actual
+byte transfer remains to ship a working initramfs unpack.
+
+**Files**:
+
+- `uefiboard/dtb_probe.go` — `EFIDTBTableGUID` (`b1b621d5-f19c-41a5-830b-d9152c69aae0`),
+  `DTBProbeResult`, `guidsEqual`, `efiST{NumberOfTableEntries,ConfigurationTable}`
+  offsets (104, 112), spec-pinned 24-byte
+  `EFI_CONFIGURATION_TABLE` entry stride.
+- `uefiboard/dtb_probe_tamago.go` — live walker
+  (`ProbeDTBConfigurationTable`) of `gST->ConfigurationTable`
+  looking for the DTB GUID.
+- `uefiboard/dtb_probe_test.go` — host-side unit tests for the
+  GUID textual form, `guidsEqual` discriminator, offset constants,
+  and entry size.
+- `internal/embed_initramfs/` — new package with embedded 260-byte
+  `initramfs.cpio.gz` (single `/init` script), `Bytes` / `RawBytes` /
+  `Size` accessors + tests covering gzip magic + cpio newc magic +
+  defensive-copy semantics.
+- `phase2_oci_kernel_boot.go` — MODE C extended with the DTB
+  probe + the embedded-initrd publish + a new `fetchInitrdFromOCI`
+  helper for the OCI-streaming path (gzip auto-detect via
+  `1f 8b 08` magic; same 64 MiB layer cap as the kernel path).
+- `internal/livekernelboot/run.sh` — arm64 PASS gate extended
+  with `DTB probe:` + `PublishInitrd OK` markers; final log
+  filter extended with `Unpacking initramfs`, `cloud-boot-m83`,
+  `Kernel panic`, `Attempted to kill init`.
 
 ## 4. Five validation checks before declaring shape A complete
 
