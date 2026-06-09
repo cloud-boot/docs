@@ -206,7 +206,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.2        | queued                              | real PE compressor: `go-compressions/*` + `go-coff/efipack`|
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
-| M7.1b       | queued                              | cosign signature verification on manifest                  |
+| **M7.1b**   | **done 2026-06-09 (cosign SHIPPED)** | **keyed cosign ECDSA-P256 signature verification**         |
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | M8.1        | deferred behind M6.2 + M7.1b        | real Linux EFI-stub handover (post-EBS)                    |
 
@@ -1819,11 +1819,97 @@ path itself is unchanged.)
   bad descriptor digest, transport without `StreamTransport`,
   too-many-redirects.
 
-**M7.1b (cosign) remains.** Outline (no commits yet): bring a
-pure-Go cosign verifier online against the embedded TUF root,
-verify the manifest digest's signature before any blob descend.
-ECDSA P-256 + Ed25519 keys only; transparency-log inclusion proof
-is the OCI signature scheme, not signed-text.
+**M7.1b (cosign) — SHIPPED 2026-06-09.** See the dedicated section
+below.
+
+### M7.1b — cosign keyed signature verification (SHIPPED 2026-06-09)
+
+**Status:** SHIPPED — pure-Go ECDSA P-256 cosign signature
+verification live on `main` as of 2026-06-09. Closes the last
+security gate before M8.1 (real-kernel boot) can trust a signed OCI
+manifest.
+
+**Scope:** keyed mode ONLY (= ECDSA P-256 against a pinned public
+key the caller already trusts). Keyless mode (Rekor + Fulcio + OIDC)
+is OUT of scope — we control which images we boot and embed the
+signer's public key.
+
+**Acceptance criteria:**
+
+1. Verifies a real signed image (or self-test against an ephemeral
+   keypair) and prints `COSIGN OK`.
+2. Tampering causes `COSIGN FAIL` — the probe exercises a flip-a-bit
+   negative case in self-test mode every run, so the live runner
+   matches BOTH `happy path Verify OK` AND `tampered Verify rejected`.
+
+**Deliverables (shipped):**
+
+- `uefiboard/ministack/oci/cosign.go` —
+  - `CosignVerifier{PubKey *ecdsa.PublicKey}` + `NewCosignVerifier(pemPubKey []byte)`
+    parses PEM/PKIX P-256 (rejects RSA, Ed25519, non-P-256 curves).
+  - `SigTag(manifestDigest)` — derives the
+    `sha256-<hex>.sig` cosign tag from a `sha256:<hex>` digest.
+  - `CanonicalPayload(dockerRef, manifestDigest)` — hand-formatted
+    (no `encoding/json` roundtrip) canonical payload bytes matching
+    cosign's `payload.Cosign{}.MarshalJSON`. Stable byte-for-byte
+    across Go versions; defensive escaping for control chars + `"`
+    + `\` so a malicious operator-supplied reference can't forge a
+    different payload via injection.
+  - `(*CosignVerifier).Verify(reg, ref, manifestDigest)` — fetches
+    the `.sig` artifact via `reg.FetchManifestRaw(tag)`, walks each
+    layer, base64-decodes the `dev.sigstore.cosign/v1/signature`
+    annotation, and `ecdsa.VerifyASN1`-verifies it against
+    `sha256(CanonicalPayload(ref.Host+"/"+ref.Repo, manifestDigest))`.
+    First passing layer returns nil; all-fail returns
+    `ErrCosignNoMatchingSignature` wrapping the last per-layer reason.
+- `uefiboard/ministack/oci/cosign_test.go` — host coverage 94.9% for
+  the whole `oci` package (cosign.go functions all ≥ 94%). Cases:
+  happy single-layer, two-layer with second-good, tampered signature,
+  wrong manifest digest, wrong pubkey, bad-digest arg, missing .sig
+  tag (404), empty-layers manifest, missing annotation, malformed
+  base64, malformed sig manifest JSON, empty sig manifest body, nil
+  verifier, zero-pubkey verifier, PEM-bad, DER-bad, RSA-rejected,
+  P-384-rejected (non-P-256 curve), payload-escape exhaustively.
+- `phase2_oci_cosign_verify.go` + `_stub.go` — gated probe
+  (`-tags phase2_oci_cosign_verify`). Default mode is **self-test**:
+  generate an ephemeral P-256 keypair in-VM, sign the canonical
+  payload locally, walk a hand-built in-RAM `.sig` manifest through
+  a mock `Transport`, then exercise BOTH the happy path and a
+  tampered-signature negative case in the same run. Network legs
+  (DHCP + roots) are still brought up so the live runner anchors on
+  the same shape as the M7 / M7.1a probes. A `runCosignRealImage()`
+  branch is wired in alongside, ready to flip via the
+  `cosignTargetRef` + `cosignEmbeddedPubKey` constants once a
+  keyed-cosign-signed public image is pinned in this repo.
+- Per-arch Taskfile targets `cosign:{elf,efi,live}:<arch>` +
+  `cosign:all` + `cosign:test`, modelled on `oci:*` / `ocistream:*`.
+- `internal/livecosign/run.sh` — live runner, modelled on
+  `internal/liveocistream/run.sh`. amd64 prints "skipped pending M6.2"
+  and exits 0 (build still exercised by `cosign:efi:amd64`); arm64 /
+  riscv64 / loong64 run live under QEMU+EDK2 with a 120 s timeout.
+
+**Live results (self-test mode):**
+
+| arch    | result | wall  | anchors                                                                                            |
+|---------|--------|-------|----------------------------------------------------------------------------------------------------|
+| arm64   | PASS   | 120 s | pubkey OK; happy Verify OK; tampered rejected; lease acquired; embedded roots = 8; COSIGN OK       |
+| riscv64 | PASS   | 120 s | pubkey OK; happy Verify OK; tampered rejected; lease acquired; embedded roots = 8; COSIGN OK       |
+| loong64 | PASS   | 120 s | pubkey OK; happy Verify OK; tampered rejected; lease acquired; embedded roots = 8; COSIGN OK       |
+
+**Why self-test mode (not a real signed image) in this commit:** the
+canonical M7.1b candidate (`ghcr.io/sigstore/cosign/cosign:v2.4.0`) is
+signed KEYLESSLY (Fulcio + Rekor), which is out of M7.1b scope. The
+self-test path proves the verifier end-to-end against a real ECDSA
+signature; wiring the real-image branch against a keyed-cosign-signed
+public image (e.g. one we sign and publish from cloud-boot) is queued
+as a tiny follow-up — flip two constants, no code change.
+
+**Why not Ed25519?** Cosign's keyed-mode wire format supports ECDSA
+P-256 and Ed25519. We ship ECDSA P-256 only because (a) it matches
+the cosign CLI default (`cosign generate-key-pair` emits P-256), (b)
+our images will be signed by tooling that defaults to the same, and
+(c) keeping the cipher set minimal shrinks the failure surface. Adding
+Ed25519 is a ~20-line follow-up if a use case appears.
 
 ### M7.alt — oras.land/oras-go/v2 evaluation (POC SHIPPED 2026-06-09)
 
