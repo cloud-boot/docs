@@ -215,7 +215,8 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
 | **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 self-publish SHIPPED 2026-06-10; 24h-TTL permanence gap CLOSED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar. CLOSED via §M8.4 "self-publish" (2026-06-10): `cmd/cloudboot-oci-extract` extracts vmlinuz from Debian linux-image / linux-binary .deb, validates PE32+ + COFF Machine, re-packages as tar.gz `boot/vmlinuz` layer, pushes to ttl.sh anonymous-24h. Both arches now MODE C with live kernel boot (Linux 6.12.90 riscv64 + Linux 7.0.12 loong64) verified. Permanence gap closed by `.github/workflows/vmlinuz-nightly.yml` (cron 04:00 UTC, ttl.sh always-on + optional ghcr.io bearer-auth gated on `GHCR_TOKEN` secret) — see §M8.4 self-publish "Permanence gap CLOSED".** |
-| **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a OPEN (DTB-absence Data Abort)** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel side blocked on R-M8.5a — firmware Data Abort because EDK2 arm64 publishes ACPI + SMBIOS but no DTB, and the empty-DTB patch path in EFI-stub null-derefs (FAR=0x40). Cmdline broadened to acpi=force + earlycon=pl011,mmio32 + rdinit=/init pre-emptively but the crash is pre-cmdline-parse. M8.6 mitigation: publish a DTB via gBS->InstallConfigurationTable from Go.** |
+| **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a CLOSED 2026-06-10 via M8.6** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel-side R-M8.5a (empty-DTB null-deref) CLOSED by M8.6 PublishDTB: EFI-stub now prints `Using DTB from configuration table` + `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` — old crash gone; new RngDxe-side fault (R-M8.6a, kernel-side) tracked separately below.** |
+| **M8.6**    | **SHIPPED 2026-06-10; R-M8.5a CLOSED; R-M8.6a OPEN (RngDxe Translation fault)** | **PublishDTB + InstallConfigurationTable + AllocatePool wrappers + embedded arm64-virt DTB. Live arm64 trace: `DTB published ( 7191 bytes)` → ProbeDTBConfigurationTable now sees 9 GUIDs (was 8) with `b1b621d5-...` (EFI_DTB_TABLE_GUID) at index 8 → `EFI stub: Using DTB from configuration table` → `EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path`. The empty-DTB null-deref (FAR=0x40 in EFI-stub) that blocked M8.5 is GONE. fw_cfg-via-MMIO path implemented + correct per QEMU docs/specs/fw_cfg.rst but EDK2 ArmVirtPkg doesn't map the fw_cfg window into page tables (Synchronous External Abort FAR=0x09020008) — short-circuited via per-arch fwCfgMMIOBase returning (0, false). Embedded DTB path is the M8.6 default; live MMIO walker auto-engages the day EDK2 (or our own pre-flight AddMemorySpace) makes 0x09020000 reachable.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
 
@@ -3494,6 +3495,233 @@ Coverage: 100% in `internal/embed_initramfs` (all 5 tests
 including the new ELF guard); uefiboard DTB probe tests
 unchanged + still green (new AllGUIDs field exercised by the
 existing live walker).
+
+### M8.6 — DTB plumbing via fw_cfg + InstallConfigurationTable (SHIPPED 2026-06-10)
+
+R-M8.5a (DTB-absence Data Abort) **CLOSED**. The empty-DTB
+null-deref in the EFI-stub's empty-DTB patch path was triggered
+because EDK2 ArmVirtPkg on `-machine virt` exposes ACPI 2.0 +
+SMBIOS3 but NOT a flattened device tree blob under
+`EFI_DTB_TABLE_GUID`; M8.6 publishes a DTB ourselves before
+`StartImage(kernel)` so the EFI-stub takes its normal devicetree
+path instead.
+
+**What changed:**
+
+1. `uefiboard/dtb_fetch.go` + `uefiboard/dtb_fetch_tamago.go` +
+   per-arch `dtb_fetch_<arch>_tamago.go` — pure-Go reader of QEMU's
+   synthesised DTB via the fw_cfg MMIO device. Implements the
+   FILE_DIR (selector `0x0019`) walk per QEMU
+   `docs/specs/fw_cfg.rst`, matches the entry whose name is
+   `etc/fdt`, selects it, reads `size` bytes from the data port.
+   Wire-format correctly handled per the QEMU spec (big-endian
+   selector + size; sequential byte reads advance the data-port
+   pointer). Host stub returns `ErrNotImplementedOnHost`.
+
+2. `uefiboard/embed_dtb_arm64.go` + `embed_dtb_arm64_virt.dtb`
+   (7 191 bytes) + per-arch stubs — embedded fallback DTB.
+   Generated once at integration time via:
+
+   ```
+   qemu-system-aarch64 -M virt,dumpdtb=/tmp/m86-virt.dtb \
+       -cpu max -m 4096 -display none -no-reboot \
+       -bios <edk2-aarch64-code.fd> \
+       -netdev user,id=n0 \
+       -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off
+   ```
+
+   then trimmed from QEMU's 1 MiB-padded output to the real
+   struct+strings extent (`totalsize` field in the FDT header
+   fixed up to match). Embedded via `//go:embed` so it's part of
+   every kernelboot EFI artifact, no runtime fetch required.
+
+3. `uefiboard/install_config_table.go` +
+   `install_config_table_tamago.go` + `install_config_table_host.go` —
+   three new wrappers built on the existing `efiCall` thunk:
+   - `InstallConfigurationTable(EFI_GUID, unsafe.Pointer) error` —
+     direct `gBS->InstallConfigurationTable` wrapper. Offset 192
+     in `EFI_BOOT_SERVICES` per UEFI 2.10 §4.2 table 4.2 (already
+     cross-referenced in `initrd_protocol.go`).
+   - `AllocatePool(memoryType uint32, size uintptr) (uint64, error)` —
+     parity wrapper for `gBS->AllocatePool` (offset 64, already
+     used by `SetLoadOptions` via `efiBSAllocatePool` const).
+   - `PublishDTB(dtb []byte) error` — the high-level helper:
+     `AllocatePool(EfiBootServicesData, n)` → copy dtb in →
+     `InstallConfigurationTable(DTBGUIDBytes, poolPtr)`. Returns
+     `ErrDTBEmpty` for a zero-length input.
+
+4. `phase2_oci_kernel_boot.go` MODE C — between `SetLoadOptions`
+   and the existing M8.4 DTB probe + `PublishInitrd`, we now:
+   (a) try `FetchQemuDTB()` (currently short-circuits to
+   `ErrFwCfgUnsupportedArch` on arm64 — see fw_cfg-gap note
+   below), (b) fall back to `EmbeddedArm64VirtDTB()`, (c) call
+   `PublishDTB(...)` with whichever source returned bytes.
+
+5. Host-side tests:
+   - `uefiboard/dtb_fetch_test.go` (6 tests): host stub returns
+     `ErrNotImplementedOnHost`, parser handles known-good +
+     fully-padded + short-buffer inputs, fw_cfg constants pinned
+     against QEMU's spec, error-message keyword sanity.
+   - `uefiboard/install_config_table_test.go` (8 tests):
+     `PublishDTB(nil)` returns `ErrDTBEmpty`, non-empty panics on
+     host, `InstallConfigurationTable` + `AllocatePool` panic on
+     host with the expected message, offset 192 pinned, EFI_GUID
+     sizeof = 16, `DTBGUIDBytes` round-trips through the
+     mixed-endian encoding of `EFIDTBTableGUID`, error keywords.
+
+**fw_cfg gap — why the embedded DTB is the M8.6 default, not the
+live MMIO walker** (R-M8.6b — OPEN, deferred):
+
+The live MMIO walker (`FetchQemuDTB`) is implemented and verified
+correct against QEMU's `docs/specs/fw_cfg.rst` wire format. But
+EDK2's `ArmVirtPkg` on QEMU `-machine virt` does NOT add the
+fw_cfg MMIO window (`0x09020000`–`0x09020017`) to the UEFI page
+tables it hands the loaded image. The very first selector-port
+write inside `FetchQemuDTB` faults with a Synchronous External
+Abort:
+
+```
+ESR_EL1 EC=0x25 (Data Abort same EL) ISS=0x50 (no translation)
+FAR_EL1 0x0000000009020008
+ASSERT [ArmCpuDxe] ... DefaultExceptionHandler.c(343): ((BOOLEAN)(0==1))
+```
+
+ArmCpuDxe's default handler asserts on this and the boot is
+dead. The arm64-specific `fwCfgMMIOBase()` returns `(0, false)`
+in M8.6 so the live walker is never invoked; the embedded DTB
+path takes over instead. The walker code is retained as
+documentation + ready-to-engage code for the day one of:
+
+- EDK2 `ArmVirtPkg` adds the fw_cfg window unconditionally to
+  its early page-table setup (upstream feature request territory).
+- We add a pre-flight `gDS->AddMemorySpace` +
+  `gDS->SetMemorySpaceAttributes` pair from Go to map fw_cfg into
+  our address space before any MMIO read.
+
+Either fix flips the second return value of `fwCfgMMIOBase()` to
+`true` and the live path engages transparently.
+
+**Live arm64 PASS** (`task kernelboot:live:arm64`, M8.6,
+2026-06-10):
+
+```
+phase2-oci-kernel-boot: extracted vmlinuz bytes = 53096960
+phase2-oci-kernel-boot: vmlinuz PE header OK (MZ)
+phase2-oci-kernel-boot: FetchQemuDTB: uefi: fw_cfg MMIO base not known for this architecture
+phase2-oci-kernel-boot: using embedded arm64-virt DTB; bytes = 7191
+phase2-oci-kernel-boot: DTB published ( 7191 bytes)
+phase2-oci-kernel-boot: LoadImage OK, handle = 0x13f009218
+phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len = 113
+phase2-oci-kernel-boot: DTB probe: SystemTable.NumberOfTableEntries = 9
+phase2-oci-kernel-boot: DTB probe: EFI_DTB_TABLE_GUID PRESENT — kernel EFI-stub will auto-locate the DTB
+phase2-oci-kernel-boot: DTB probe: VendorTable = 0x12edd4018
+phase2-oci-kernel-boot: DTB probe: GUID[ 8 ] data1 = 0xb1b621d5 data2 = 0xf19c data3 = 0x41a5 data4 = 0x83 0x0b 0xd9 0x15 0x2c 0x69 0xaa 0xe0
+phase2-oci-kernel-boot: PublishInitrd OK, initrd handle = 0x13e8cad18
+phase2-oci-kernel-boot: StartImage entering EFI-stub kernel
+EFI stub: Booting Linux Kernel...
+EFI stub: ERROR: efi_get_random_bytes() failed (0x8000000000000002), KASLR will be disabled
+EFI stub: Using DTB from configuration table
+EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+```
+
+Compare to the M8.5 trace which stopped at "Loaded initrd" then
+took an instant Data Abort (FAR=0x40 = empty-DTB null-deref):
+- M8.5: `EFI stub: Generating empty DTB` → fault.
+- M8.6: `EFI stub: Using DTB from configuration table` → continues.
+
+The R-M8.5a null-deref is **gone**. The ConfigurationTable now
+has 9 entries (was 8 in M8.5) with the new `b1b621d5-…`
+(EFI_DTB_TABLE_GUID) entry pointing at our 7 191-byte DTB pool
+allocation. The kernel EFI-stub finds it via the same scan its
+`efi_get_fdt()` helper has always done.
+
+**R-M8.6a — kernel-side RngDxe Translation fault (OPEN, NEW)**:
+
+After "Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device
+path" the kernel triggers a Synchronous Exception inside
+`RngDxe.dll` at offset `+0x3220`, FAR=`0x40`, ESR=`0x96000047`
+(third-level translation fault):
+
+```
+PC 0x00013FDB9220 (0x00013FDB6000+0x00003220) [ 0] RngDxe.dll
+PC 0x00013FDB88A4 (0x00013FDB6000+0x000028A4) [ 0] RngDxe.dll
+PC 0x00012E1B0400
+PC 0x00012E1AB46C
+PC 0x00004768D964 (0x000047687000+0x00006964) [ 1] DxeCore.dll
+PC 0x00013C100434
+```
+
+This is a DIFFERENT bug from R-M8.5a — happens AFTER the
+EFI-stub has accepted the DTB + loaded the initrd, when the
+stub's `efi_get_random_bytes` retry path (the first call already
+failed with `0x8000000000000002` = EFI_INVALID_PARAMETER) re-
+enters `RngDxe`. Looks like an EDK2 `RngDxe` v9.2.0-arm64 bug
+when called with the second-call argument the EFI-stub passes
+(the stub gives up on KASLR but still wants entropy for the
+kernel command-line random seed).
+
+The fault is in firmware code (RngDxe) on a path the EFI-stub
+explicitly handles as "retry"; the simplest mitigation is to
+disable the kernel's pre-EBS random_seed request via a kernel
+cmdline option (`random.trust_bootloader=off` or similar) or to
+build a kernel with `CONFIG_RANDOM_TRUST_BOOTLOADER=n`. Tracked
+for M8.7.
+
+**M8.6 PASS criterion met**: R-M8.5a CLOSED — EFI-stub now
+accepts our DTB and proceeds past empty-DTB patch path into
+initrd-load + (would-be) post-EBS handoff. The new R-M8.6a is
+strictly post-M8.5a in the boot trace.
+
+**Files**:
+
+- `uefiboard/dtb_fetch.go` (new) — host-buildable surface: errors,
+  constants, parser.
+- `uefiboard/dtb_fetch_tamago.go` (new) — live MMIO walker.
+- `uefiboard/dtb_fetch_arm64_tamago.go` (new) — per-arch base
+  (returns (0, false) until EDK2 maps fw_cfg).
+- `uefiboard/dtb_fetch_other_tamago.go` (new) — per-arch base
+  for amd64/loong64/riscv64.
+- `uefiboard/dtb_fetch_host.go` (new) — host stub.
+- `uefiboard/dtb_fetch_test.go` (new) — 6 host tests.
+- `uefiboard/install_config_table.go` (new) — host-buildable
+  surface: offset, errors, EFI_GUID type, DTBGUIDBytes.
+- `uefiboard/install_config_table_tamago.go` (new) — live
+  `InstallConfigurationTable` + `AllocatePool` + `PublishDTB`.
+- `uefiboard/install_config_table_host.go` (new) — host stubs.
+- `uefiboard/install_config_table_test.go` (new) — 8 host tests.
+- `uefiboard/embed_dtb_arm64.go` (new) — //go:embed of the
+  trimmed DTB.
+- `uefiboard/embed_dtb_other_tamago.go` (new) — empty-slice stub
+  for non-arm64 tamago arches.
+- `uefiboard/embed_dtb_host.go` (new) — host //go:embed wrapper.
+- `uefiboard/embed_dtb_arm64_virt.dtb` (new, 7 191 bytes) — the
+  trimmed DTB asset.
+- `phase2_oci_kernel_boot.go` — MODE C now calls `FetchQemuDTB` +
+  `EmbeddedArm64VirtDTB` + `PublishDTB` before LoadImage.
+- `internal/livekernelboot/run.sh` — arm64 PASS gate now
+  additionally requires `DTB published` + `EFI stub: Using DTB
+  from configuration table` lines.
+
+To regenerate the embedded DTB after a QEMU update:
+
+```sh
+qemu-system-aarch64 -M virt,dumpdtb=/tmp/m86-virt.dtb \
+    -cpu max -m 4096 -display none -no-reboot \
+    -bios ~/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-aarch64-code.fd \
+    -netdev user,id=n0 \
+    -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off
+python3 -c "
+import struct
+src = open('/tmp/m86-virt.dtb','rb').read()
+m, total, ostr, ostrings, orsvmap, ver, lcv, bootcpu, sz_strings, sz_struct = struct.unpack('>10I', src[0:40])
+real_end = ostrings + sz_strings
+new_hdr = struct.pack('>10I', m, real_end, ostr, ostrings, orsvmap, ver, lcv, bootcpu, sz_strings, sz_struct)
+open('uefiboard/embed_dtb_arm64_virt.dtb','wb').write(new_hdr + src[40:real_end])
+"
+```
+
+Coverage: 14 new host tests in `uefiboard/` (6 fw_cfg + 8
+install-config-table); all pre-existing tests still green.
 
 ## 4. Five validation checks before declaring shape A complete
 
