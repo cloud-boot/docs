@@ -8,13 +8,15 @@ title: cloud-boot — overview
 `Virtualization.framework`, and OpenStack — no per-image rebuild, no
 custom signing, no kernel-side ZFS module.**
 
-cloud-boot is a UKI toolchain plus a tiny UEFI bootloader. It ships
-**three complementary boot paths** that all land on the same end
-state — a stock distro userspace from an unmodified cloud image.
+cloud-boot ships **two complementary tracks** that all land on the
+same end state — a stock distro userspace from an unmodified cloud
+image. Phase 1 is the Linux-side UKI toolchain with three boot
+paths ; Phase 2 is a pure-Go bare-metal UEFI loader that drives the
+whole networked-OCI pipeline from inside Boot Services.
 
 <div class="grid cards" markdown>
 
--   :material-rocket-launch:{ .lg .middle } __Path A — kexec__
+-   :material-rocket-launch:{ .lg .middle } __Phase 1 · Path A — kexec__
 
     ---
 
@@ -22,7 +24,7 @@ state — a stock distro userspace from an unmodified cloud image.
     resolves a plan, and `kexec`s the distro kernel. Works wherever
     `kexec_file_load` works — **KVM, QEMU, OpenStack, bare metal**.
 
--   :material-apple:{ .lg .middle } __Path C — menu-then-reboot__
+-   :material-apple:{ .lg .middle } __Phase 1 · Path C — menu-then-reboot__
 
     ---
 
@@ -33,15 +35,25 @@ state — a stock distro userspace from an unmodified cloud image.
     next pass. **No kexec — works on `Virtualization.framework`
     where `kexec_file_load` is trapped.**
 
--   :material-flash:{ .lg .middle } __Path B — pure-UEFI loader__
+-   :material-flash:{ .lg .middle } __Phase 1 · Path B — TinyGo UEFI loader__
 
     ---
 
     A TinyGo PE/COFF UEFI application that stays inside Boot
     Services and `LoadImage`s the distro kernel straight out of an
-    ext4 / xfs / btrfs rootfs. Useful on QEMU/OVMF and EDK2
-    hardware; VZ-specific networked phases were abandoned because
-    the VZ firmware exposes no `HTTP` / `TCP4` / `DHCP4` / `DNS4`.
+    ext4 / xfs / btrfs / UFS2 rootfs. Useful on QEMU/OVMF and EDK2
+    hardware ; six Linux families + FreeBSD + NetBSD verified.
+
+-   :material-language-go:{ .lg .middle } __Phase 2 — pure-Go TamaGo loader__
+
+    ---
+
+    A pure-Go bare-metal UEFI application on the real Go runtime
+    via [TamaGo](https://github.com/usbarmory/tamago). PCI walk →
+    virtio-net → DHCPv4 → DNS → TLS (CCADB roots) → HTTPS → OCI
+    Distribution v2 → cosign verify → `LoadImage` → `StartImage` →
+    Linux. **Live end-to-end on arm64 + riscv64 + loong64**
+    (2026-06-10) ; amd64 firmware-bug chase ongoing.
 
 </div>
 
