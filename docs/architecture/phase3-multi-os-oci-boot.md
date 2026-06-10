@@ -1,6 +1,6 @@
 # Phase 3 — OS-agnostic OCI boot
 
-**Status:** sprint 1 (FreeBSD MVP) WIP — landed 2026-06-11.
+**Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.2 closed 2026-06-11; ready for sprint 2 (UFS).
 **Owner:** cloud-boot/tamago-uefi
 **Companion repos:** [`go-virtio`](../../../../go-virtio), [`go-filesystems`](../../../../go-filesystems)
 
@@ -262,6 +262,108 @@ Working theories (in priority order for sprint 1.2):
    `ConnectController` and our reset trampoline's lookup against
    the registry hits a stale entry.
 
+## Sprint 1.2 — `ConnectController` `#PF` closed (2026-06-11)
+
+Sprint 1.2 closes R-fbsd1a — the firmware-side page fault that
+sprint 1.1's final live test hit on entering `ConnectController`. The
+root cause was two stacked register-corruption bugs in the firmware-
+to-Go trampoline path:
+
+### Bug A — MS x64 callee-saved XMM6..XMM15 NOT preserved
+
+The four `block_io_publish_amd64.s` trampolines (`Reset`,
+`ReadBlocks`, `WriteBlocks`, `FlushBlocks`) saved only the integer
+callee-saved set (`RBX`, `RBP`, `RDI`, `RSI`, `R12..R15`). MS x64
+**also** marks `XMM6..XMM15` as callee-preserved. Go's amd64 codegen
+emits XMM moves in plenty of innocent-looking call sites (zeroed
+struct stores, byte-loop memmove inlining), so returning to firmware
+with corrupted XMM6..XMM15 risks a delayed firmware-side page fault
+when EDK2 later reloads its preserved XMM state. The `CR2 =
+0xFFFFFFFF98009898` fingerprint pattern (sign-extended uint32 in a
+64-bit register) was the giveaway.
+
+**Fix:** trampoline prologue now saves all 10 XMM regs via `MOVUPS`
+into a 16-byte-stride save area; epilogue restores symmetrically.
+Frame size grew `SUBQ $128, SP` → `SUBQ $304, SP` (128 integer area
++ 160 XMM area + 16 alignment). The 5-arg shapes' stack-passed-5th-
+arg offset shifted from `SP+168` → `SP+344` (delta +176 = frame-grow
+delta). The same fix was applied to `initrd_protocol_amd64.s`
+(`LoadFile`) and `rng_protocol_amd64.s` (`GetRNG`, `GetInfo`)
+defensively, though neither was reported failing under M8.x.
+
+### Bug B — autogen ABIInternal wrapper clobbers X15 + R14 on return
+
+This was the actual reason the XMM-save fix on its own didn't move
+the failure. A Go function-value's first word points at the
+*ABIInternal* wrapper, not at our `.abi0` entry. The amd64 wrapper
+ends with:
+
+```
+CALL  .abi0
+XORPS X15, X15                  ; clobbers MS x64 callee-saved X15
+MOVQ  $-8, R14
+MOVQ  FS:0(R14), R14            ; clobbers MS x64 callee-saved R14
+POPQ  BP
+RET
+```
+
+That trailer fires **after** our `.abi0` trampoline restored X15 and
+R14, so firmware sees them corrupted regardless of what our prologue
+saved. The Go ABI rules are right to do that for Go-to-Go calls; we
+just shouldn't be installing the wrapper PC into a firmware-callable
+function-pointer slot.
+
+**Fix:** added four asm helpers
+`blockIO_<op>_trampolinePC()` in `block_io_publish_amd64.s` that
+return the .abi0 entry PC via `LEAQ ·blockIO_<op>_trampoline(SB)`
+(from asm, that resolves to the ABI0 symbol — not the wrapper).
+`PublishBlockIO` now reads the PC through those helpers instead of
+the funcval indirection.
+
+### Result
+
+```
+phase3-oci-freebsd-boot: PublishBlockIO OK; block handle = 0x7e204398
+phase3-oci-freebsd-boot: ConnectController OK (DiskIo/PartitionDxe/FatDxe binding done)
+phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found 2 total handle(s) (parent + siblings)
+phase3-oci-freebsd-boot: matching SFS child handle = 0x7daf7f98
+phase3-oci-freebsd-boot: child device path length = 66 bytes
+phase3-oci-freebsd-boot: LoadImage( \EFI\BOOT\BOOTX64.EFI ) OK; image handle = 0x7daf5f18
+phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE -- transferring control to loader.efi
+press any key to interrupt reboot in 5 seconds...
+phase3-oci-freebsd-boot: StartImage returned: uefi: StartImage: EFI_STATUS=0x800000000000000e
+```
+
+The `press any key to interrupt reboot` prompt is FreeBSD's
+`loader.efi` countdown — confirms the loader started and ran past
+its no-UFS-root branch. Sprint 1.2 PASS gate met.
+
+### M8.x regression check (all 4 arches)
+
+| Arch     | M8.10/11/12 result |
+|----------|--------------------|
+| amd64    | PASS — `/init userspace reached` |
+| arm64    | PASS — `/init userspace reached` |
+| riscv64  | PASS — `/init userspace reached` |
+| loong64  | PASS — `/init userspace reached` |
+
+No regressions. The XMM-save change is defensive on the
+`initrd_protocol_amd64.s` / `rng_protocol_amd64.s` paths and the
+PC-helper fix is scoped to the block-IO surface only (the
+loadFile/rng surfaces still install the funcval PC; if a future
+caller exposes the same ABIInternal-wrapper bug there, the same
+helper pattern applies).
+
+### Audit of the other three arches
+
+The XMM-save bug is amd64-specific (MS x64 ABI). The arm64 / riscv64
+/ loong64 trampolines do not currently save the FP callee-saved set
+(`D8..D15` / `fs0..fs11` / `f24..f31`). Phase 2 / M8.x has been live-
+validated on all three arches without an analogous failure surfacing,
+but the same defensive save/restore would be cheap to add when the
+arm64 / riscv64 / loong64 block-IO publisher trampolines land in
+sprint 1.3. Tracked as a follow-up there.
+
 ## Relationship to existing code
 
 The pre-existing `uefiboard/block_io_protocol*.go` files are the
@@ -276,9 +378,9 @@ constants in `block_io_protocol.go`.
 
 | Sprint | Target                                    | Gap to close |
 |--------|-------------------------------------------|---------------|
-| 1.1    | LoadImage from discovered SFS              | DONE (SFS-parent filter + LoadImageFromSFS + custom ESP image) — blocked on `ConnectController` `#PF` |
-| 1.2    | Resolve `ConnectController` `#PF`          | XMM6..XMM15 save in trampolines + frame-alignment audit |
-| 1.3    | arm64 / riscv64 / loong64 publisher trampolines | port `block_io_publish_amd64.s` |
+| 1.1    | LoadImage from discovered SFS              | DONE (SFS-parent filter + LoadImageFromSFS + custom ESP image) |
+| 1.2    | Resolve `ConnectController` `#PF`          | **DONE** — XMM6..XMM15 save in trampolines + bypass ABIInternal wrapper via `LEAQ`-based PC helper |
+| 1.3    | arm64 / riscv64 / loong64 publisher trampolines | port `block_io_publish_amd64.s` + defensive D8..D15 / fs0..fs11 / f24..f31 save |
 | 2      | FreeBSD with UFS root                     | `go-filesystems/ufs` + filesystem publish (so loader.efi finds a kernel) |
 | 3      | NetBSD / OpenBSD                          | FFS support in go-filesystems |
 | 4      | Windows                                    | `go-filesystems/ntfs` + UEFI-stub special-casing |
