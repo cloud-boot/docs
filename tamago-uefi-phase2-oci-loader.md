@@ -213,8 +213,35 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
-| **M8.3**    | **SHIPPED arm64 (live kernel boot) 2026-06-09** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..." (R-M8.3a/b CLOSED)** |
+| **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
 | **M8.4**    | **SHIPPED arm64 (DTB probe + initrd publish wired) 2026-06-09** | **ConfigurationTable DTB probe + PublishInitrd in MODE C; EFI-stub locates initrd handle + invokes LoadFile2 (kernel logs "Failed to load initrd!" — trampoline interop gap documented as R-M8.4a)** |
+
+### M8.3 — per-arch live kernel boot matrix (2026-06-10)
+
+| Arch     | Mode  | Public EFI-stub OCI ref                                                  | Live test                                                                                                     |
+|----------|-------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | PASS — EFI-stub prints "Booting Linux Kernel..." + KASLR + DTB + initrd-load attempts (see M8.3 dump below). |
+| amd64    | dormant (B) | siderolabs/kernel ships amd64 too; wiring left empty pending OVMF >4 MiB sprint on m6-2-pr2-amd64-wip. | n/a (MODE B passes; live kernel deferred).                                                                  |
+| riscv64  | dormant (B) | None found in 30-min OCI hunt 2026-06-10 — siderolabs/kernel ships amd64+arm64 only; tinkerbell/hook ships arm64+x86_64 only; Kairos amd64-only; openSUSE/Fedora riscv64 OCI 404. | PASS in MODE B (self-test) — `task kernelboot:live:riscv64`. MODE C dormant pending public ref. |
+| loong64  | dormant (B) | None found — same hunt as riscv64; cr.loongnix.cn refuses anonymous; docker.io/loongarch64/debian is a rootfs without /boot/vmlinuz. | PASS in MODE B (self-test) — `task kernelboot:live:loong64`. MODE C dormant pending public ref. |
+
+Per-arch constants live in `kernelboot_<arch>.go` next to
+`phase2_oci_kernel_boot.go`. The dispatcher consumes them via the
+existing three-way mode switch (B/A/C) — no runtime architecture
+branching, no `init()` swizzle. Flipping a dormant arch to MODE C is
+a one-line edit in its per-arch file (set `kernelBootTargetRef` +
+`kernelBootCmdline`).
+
+The runtime-discovered cmdline guidance baked into the per-arch
+docstrings:
+
+```
+arm64    console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200
+amd64    console=ttyS0,115200 earlyprintk=ttyS0,115200
+riscv64  console=hvc0 earlycon=sbi
+loong64  console=ttyS0,115200
+```
+
 
 ### M0 — Probe + type surface (done)
 
@@ -2599,7 +2626,47 @@ finding.
   streams straight from TCP into an `AllocatePages`-backed page
   list.
 
-### M8.3 — Live MODE C demo against public EFI-stub kernel (SHIPPED arm64 live kernel boot 2026-06-09)
+### M8.3 — Live MODE C demo against public EFI-stub kernel (per-arch matrix 2026-06-10)
+
+**Update 2026-06-10 (R-M8.3c — per-arch split)**: the M8.3 wiring is
+now split per arch via `kernelboot_<arch>.go`. The `init()` swizzle
+that previously zeroed the constants on non-arm64 was removed; each
+per-arch file declares its own `kernelBootTargetRef` /
+`kernelBootCmdline` / `kernelBootInitrdRef` /
+`kernelBootUseEmbeddedInitrd` package vars. The dispatcher in
+`phase2_oci_kernel_boot.go` is unchanged — it reads the same names,
+which the build system resolves to the per-arch file via build tags.
+
+Per-arch outcome of the 2026-06-10 sprint:
+
+- **arm64** — MODE C live, unchanged from the 2026-06-09 ship.
+- **amd64** — DORMANT (MODE B). siderolabs/kernel ships an amd64
+  per-arch manifest under the same index, but live testing is gated
+  on the OVMF >4 MiB threshold debug sprint on the
+  m6-2-pr2-amd64-wip branch.
+- **riscv64** — DORMANT (MODE B). 30-min OCI hunt 2026-06-10 found
+  no publicly-anonymous-pullable EFI-stub kernel: siderolabs/kernel
+  is amd64+arm64 only across `latest`, `v1.11.0`, and
+  `v0.6.0-alpha.0-…`; siderolabs/talos publishes only a
+  talosctl-linux-riscv64 CLI; tinkerbell/hook ships arm64+x86_64
+  only; Kairos amd64-only at v4.1.0; openSUSE/Fedora riscv64 OCI
+  paths return 404. Live test PASS in MODE B (chained payload
+  banner from riscv64 EFI-stub LoadImage+StartImage).
+- **loong64** — DORMANT (MODE B). Same hunt: no loong64 in
+  siderolabs/tinkerbell/Kairos/k0s. cr.loongnix.cn refuses
+  anonymous access. docker.io/loongarch64/debian:sid exists but is
+  a rootfs without `/boot/vmlinuz`. Live test PASS in MODE B.
+
+Flipping a dormant arch to MODE C is a one-line edit in
+`kernelboot_<arch>.go`: set `kernelBootTargetRef` to the OCI URL
+and `kernelBootCmdline` to the arch-appropriate cmdline (suggested
+values documented in the per-arch file headers and in the matrix at
+top-of-doc).
+
+The arm64 narrative below continues to describe the original M8.3
+ship — unchanged content, kept as the reference walkthrough.
+
+
 
 Wires the dormant M8.2 framework against a real public OCI artifact
 and runs it live on arm64. Goal: prove the *mechanism* from "OCI ref"
@@ -2633,9 +2700,11 @@ owns the per-arch firmware-callback asm trampoline in
 publishing an initrd handle in this build without that trampoline
 would hand the EFI-stub a NULL function pointer.
 
-**Per-arch gating**: `kernelBootTargetRef`/`Cmdline` are `var` (not
-`const`) so `init()` in `phase2_oci_kernel_boot.go` zeroes them on
-every arch except arm64, demoting the kernelboot probe back to MODE B
+**Per-arch gating** (historical, M8.3 ship 2026-06-09 — superseded
+by the per-arch split documented above): `kernelBootTargetRef`/
+`Cmdline` were `var` (not `const`) so an `init()` in
+`phase2_oci_kernel_boot.go` zeroed them on every arch except arm64,
+demoting the kernelboot probe back to MODE B
 (self-test against the embedded chained EFI bytes) elsewhere. amd64
 unblock = #1's OVMF sprint; riscv64 / loong64 would each need their
 own ref + cmdline validation.
