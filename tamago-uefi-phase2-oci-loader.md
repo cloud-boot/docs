@@ -214,7 +214,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
-| **M8.4**    | **SHIPPED arm64 (DTB probe + initrd publish wired) 2026-06-09** | **ConfigurationTable DTB probe + PublishInitrd in MODE C; EFI-stub locates initrd handle + invokes LoadFile2 (kernel logs "Failed to load initrd!" — trampoline interop gap documented as R-M8.4a)** |
+| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace)** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
 
