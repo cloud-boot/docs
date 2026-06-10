@@ -1337,3 +1337,264 @@ Sprint cap 120 min. Spent ~110 min on:
   PASS, others FAIL). Revert undone.
 - (~20 min) decode the register dump, draft this § 14.
 
+
+## 15. R-amd64e — H4/H5/H6 probes; H5 CONFIRMED (2026-06-10)
+
+### 15.1 Goals (per § 14.6)
+
+1. **H4** (highest priority): swap AllocatePages memory-type from
+   EfiLoaderData (=2) to EfiBootServicesData (=4). Hypothesis: the
+   image-protection-aware AllocatePages dispatch in patched OVMF
+   walks the EFI_LOADED_IMAGE_PROTOCOL slot for EfiLoaderData
+   requests; EfiBootServicesData skips it. One-constant probe.
+2. **H5**: defer AllocatePages out of cpuinit, into hwinit1 (after
+   the runtime's schedinit completes). Hypothesis: AllocatePages
+   from cpuinit fails because the firmware's caller-side state
+   isn't valid until DXE setup finishes post-StartImage.
+3. **H6**: pre-raise TPL to TPL_NOTIFY before AllocatePages.
+   Hypothesis: a firmware-internal event-handler (timer / VA-change)
+   fires during the AllocatePages dispatch at TPL_APPLICATION and
+   trips the crash.
+
+Strategy from the brief: try H4 first (cheapest), then H5, then H6.
+
+### 15.2 H4 RULED OUT — same crash signature with BootServicesData
+
+Patch: `cpuinit_amd64.s` switched `MOVQ $EFI_LOADER_DATA, DX` to
+`MOVQ $EFI_BOOT_SERVICES_DATA, DX` (defined `=4`); kept everything
+else from R-amd64c. Rebuilt all four amd64 EFIs; ran the smoke
+matrix against patched OVMF:
+
+```text
+HTTP        original  FAIL  #GP RIP = 0x55415641_E5894855
+HTTP        packed    FAIL  #GP RIP = 0x55415641_E5894855
+HTTPS       original  FAIL  #GP
+HTTPS       packed    FAIL  #GP
+OCI         original  FAIL  #GP
+OCI         packed    FAIL  #GP
+EFIHANDOVER original  FAIL  #GP
+EFIHANDOVER packed    FAIL  #GP
+```
+
+The register dump shows RDX = 0x4 (the new value — confirming the
+build picked up the patch) and yet the same `0x55415641_E5894855`
+RIP signature in the same firmware code path. The memory-type
+argument is NOT what trips the bug.
+
+H4 RULED OUT. Commit `b55c348` on `m6-2-pr2-amd64-wip-r-amd64b`.
+
+### 15.3 H5 CONFIRMED — AllocatePages works from hwinit1
+
+Patch: reverted `cpuinit_amd64.s` / `board_amd64.go` /
+`eficall_amd64.s` to `main`'s bare-metal style (RamStart =
+`runtime·text - 64 KiB`, no Boot Service calls from cpuinit; eficall
+keeps the SP-switch to top of RAM). Added a `hwinit1Probe`
+function in `board_amd64.go`:
+
+```go
+func hwinit1Probe() {
+    print("R-amd64e-H5: calling AllocatePages from hwinit1 ... ")
+    addr, err := AllocatePages(uint32(EfiBootServicesData), 1)
+    if err != nil { print("ERR ") ; print(err.Error()) ; print("\n") ; return }
+    print("OK base=0x") ; printHex(addr) ; print("\n")
+    if err := FreePages(addr, 1); err != nil { print("R-amd64e-H5: FreePages ERR ...\n") }
+    else { print("R-amd64e-H5: FreePages OK\n") }
+}
+
+//go:linkname hwinit1 runtime/goos.Hwinit1
+func hwinit1() {
+    CPU.Init()
+    hwinit1Probe()
+}
+```
+
+Result on HTTP-original boot log:
+
+```text
+R-amd64e-H5: calling AllocatePages from hwinit1 ... OK base=0x000000007db2f000
+R-amd64e-H5: FreePages OK
+hello from cloud-boot tamago/amd64 UEFI board
+runtime: go1.26.3 GOOS=tamago GOARCH=amd64
+...
+```
+
+Same on EFIHANDOVER-original (base = `0x7e3e9000`). The exact same
+Boot Service that crashed the firmware when called from cpuinit
+(R-amd64b..d, RIP-into-Go-prologue-bytes) succeeds cleanly from
+hwinit1. The bug IS firmware-lifecycle-specific.
+
+Smoke matrix (with bare-metal cpuinit + H5 probe shipped):
+
+```text
+HTTP        original  PASS  (H5 probe prints AllocatePages OK)
+HTTP        packed    FAIL  (efipack-decompressor; unrelated)
+HTTPS       original  FAIL  #PF — R-amd64a stack-into-MMIO, unrelated
+HTTPS       packed    FAIL  #PF
+OCI         original  FAIL  #PF
+OCI         packed    FAIL  #PF
+EFIHANDOVER original  PASS  (H5 probe prints AllocatePages OK)
+EFIHANDOVER packed    FAIL  #PF
+```
+
+Net change from `main`: identical 2/8 PASS. **But** the live probe
+proves that AllocatePages is now usable from post-schedinit Go
+code — which is exactly the context every shipped uefiboard caller
+already runs in (virtqueue allocator, M4 image loader, M5 ministack
+DMA). The H5-style indirection is the practical fix for any future
+"we need more heap than `text +/- N` gives us" milestone (e.g. M7
+OCI with large layers, M8.3 kernel-boot with bigger vmlinuz).
+
+H5 CONFIRMED. Commit `f21f0c6`.
+
+### 15.4 H6 RULED OUT — RaiseTPL crashes too
+
+Patch: re-introduced R-amd64b's AllocatePages-from-cpuinit, but
+this time bracketed by `gBS->RaiseTPL(TPL_NOTIFY)` and
+`gBS->RestoreTPL(savedTPL)`. Added an `allocFallback` branch that
+falls back to bare-metal RamStart if AllocatePages returns non-zero
+(so the runtime would still come up if the firmware just refused
+the call). HTTP-original smoke run:
+
+```text
+!!!! X64 Exception Type - 0D(#GP - General Protection) !!!!
+RIP  - 56575441E5894855, CS  - 0000000000000038
+RCX  - 0000000000000010   ← TPL_NOTIFY (16)
+R11  - 000000007FE49DE4   ← gBS->RaiseTPL slot (offset +24)
+```
+
+CRUCIAL OBSERVATION: the crashed function pointer is RaiseTPL
+(EFI_BOOT_SERVICES + 24), NOT AllocatePages (+40). **The firmware
+crashed INSIDE RaiseTPL, before AllocatePages was ever called.**
+The RIP byte pattern shifted from `0x55415641_E5894855` to
+`0x56575441_E5894855` (different Go function-prologue bytes) just
+because the cpuinit code grew and shifted `.text` layout.
+
+This elevates the diagnosis: the bug is NOT specific to
+AllocatePages — it's a general "any Boot Services function-pointer
+dispatch from cpuinit crashes patched-OVMF on amd64". The R-amd64d
+list of AllocatePages-internal candidate root causes (GCD walker,
+image-protection metadata chain, PAT/MTRR walker, LOADED_IMAGE
+slot dereference) cannot all be the cause for both RaiseTPL and
+AllocatePages — they don't share enough internal code.
+
+What DOES correlate is the post-fault state: `TR = 0x48` (firmware
+TSS selector), `LDTR = 0`, `IDTR = 0x7BF6AF58 0xFFF` (firmware
+IDT). Some piece of firmware caller-side state at StartImage entry
+on amd64 — most likely TR / TSS-related — makes EVERY indirect
+function-pointer dispatch yield a vtable that lands in our `.text`.
+The dispatch then jumps to Go-emitted prologue bytes, which the
+CPU executes (or RETs into) and #GPs.
+
+H6 RULED OUT. The shipped cpuinit reverts to main's bare-metal
+form. Commit `feca16c` (H6 attempt) and `90ea3be` (revert + ship).
+
+### 15.5 What this sprint shipped
+
+- **`cpuinit_amd64.s`**: identical to `main` (bare-metal RamStart =
+  text - 64 KiB; no Boot Service calls). Net effect: no
+  cpuinit-side firmware crash, same baseline boot behaviour as
+  `main` (HTTP-original + EFIHANDOVER-original PASS).
+- **`board_amd64.go`**: ramSize restored to 704 MiB (matches
+  `main`); added `hwinit1Probe()` + `printHex()` helpers that
+  exercise the H5 AllocatePages-from-hwinit1 path on every boot
+  and print a one-line success/failure trace. Cost: ~150 bytes
+  of `.text` + ~16 bytes of `.data` (no goroutine, no heap
+  allocation, no virtio dependency).
+- **`eficall_amd64.s`**: identical to `main` (SP-switch to top of
+  RAM before firmware calls — required because firmware
+  OutputString deeply-nested call graphs overflow Go goroutine
+  stacks; same caveat we documented in § 13).
+- WIP branch `m6-2-pr2-amd64-wip-r-amd64b` remains distinct from
+  `main`. Tip = commit `90ea3be`. Smoke matrix amd64 still 2/8
+  PASS — same as `main` baseline — so the merge gate STAYS
+  CLOSED. The branch's value is:
+  - H4/H5/H6 ruled-out evidence in this § 15.
+  - The hwinit1 AllocatePages probe pattern (reusable by future
+    sprints that need a runtime-managed heap pivot).
+
+### 15.6 Concrete R-amd64f directions (for the next sprint)
+
+Per the brief's "if all three fail" backup plan, plus what we
+learned from H6's negative result:
+
+1. **Build OVMF from edk2-master** (newer than stable202605) and
+   re-test. The three M6.2 fixes we manually backported may have
+   landed upstream in a different shape; a master build could
+   either reveal a follow-up commit that fixes the cpuinit-time
+   Boot Services crash, OR isolate "regression introduced AFTER
+   stable202605".
+2. **Try AVO-generated cpuinit** to rule out any hand-asm quirk.
+   Generators land in `cloud-boot/tamago-uefi/internal/asmgen/`
+   per the brief; an AVO emit of the bare-metal cpuinit + a
+   minimal RaiseTPL probe would replicate the H6 result with
+   different instruction-level encoding.
+3. **Ditch the AllocatePages-in-cpuinit approach entirely; use
+   the LOADED_IMAGE's own ImageBase + ImageSize** as the heap.
+   The firmware ALWAYS provides EFI_LOADED_IMAGE_PROTOCOL on
+   the ImageHandle; reading its ImageBase + ImageSize gives a
+   guaranteed-writable region (the PE32+ image's mapped pages).
+   This is what `main`'s bare-metal cpuinit is approximating
+   with `text - 64KiB; +RamSize`, but more robustly because
+   LOADED_IMAGE has exact bounds and respects the firmware's
+   own placement.
+4. **Investigate the TR / TSS / IDT theory**: temporarily set up
+   our own minimal IDT before any Boot Service call (handles
+   `0x0D` #GP with a marker we can probe). If the firmware's
+   indirect dispatch faults INSIDE the dispatcher because of
+   a CPU-state issue (TR pointing at the wrong TSS), our IDT
+   would catch it cleanly. Out of scope here but a strong
+   R-amd64g candidate.
+5. **The HTTPS / OCI / packed FAILs are a DIFFERENT bug** —
+   R-amd64a #PF "stack-into-MMIO" because the image's load
+   address + RamSize overflows the `0x80000000` MMIO hole on
+   QEMU q35. The H5-confirmed hwinit1 AllocatePages path is
+   the natural fix: in hwinit1, allocate a smaller "extension
+   heap" via AllocatePages (which the firmware places below
+   the MMIO hole), wire it into the existing sbrk allocator
+   as a fallback for sysReserve when bloc + n exceeds RamSize.
+   Discrete sprint of its own.
+
+### 15.7 Merge status — gate CLOSED
+
+`m6-2-pr2-amd64-wip-r-amd64b` smoke matrix: 2/8 PASS, identical
+to `main`. The brief's gate "merge to main ONLY if amd64 smoke
+matrix is GREEN" is NOT satisfied. **The branch is NOT merged.**
+
+The branch tip (`90ea3be`) is pushed to origin so the next sprint
+can pick it up. The H5 probe pattern is in there for reuse; the
+H4 / H6 commits stand as documented ruled-out experiments in the
+branch's git history (`b55c348` and `feca16c` respectively).
+
+### 15.8 Time accounting
+
+Sprint cap 120 min. Spent ~115 min on:
+
+- (~10 min) re-read § 11 / § 12 / § 13 / § 14; understand WIP
+  branch state; switch to `m6-2-pr2-amd64-wip-r-amd64b`.
+- (~10 min) parallel-agent contention — other agents kept
+  switching the main worktree back to `main` mid-build. Set up
+  a sibling git worktree at
+  `~/Documents/VCS/GIT/github.com/cloud-boot/tamago-uefi-r-amd64e`
+  to isolate from the contention. Pattern reusable for any
+  multi-agent amd64 work going forward.
+- (~10 min) baseline rebuild + smoke (proved the docs § 14.4
+  "R-amd64c shipped tree all 8 cells FAIL" was a misread; the
+  shipped tree actually behaves like `main` for HTTP and
+  EFIHANDOVER originals — the all-FAIL state is only when
+  cpuinit calls AllocatePages, which the R-amd64c tip does).
+- (~15 min) implement H4 + rebuild + smoke + decode register dump
+  showing RDX = 4 yet same RIP signature.
+- (~25 min) implement H5: revert to main-style cpuinit + write
+  `hwinit1Probe` + `printHex` helpers + rebuild + smoke. Watch
+  `R-amd64e-H5: AllocatePages OK base=0x...` print on the
+  HTTP-original log. Confirm 2/8 PASS matches main baseline AND
+  the probe fires on every PASS.
+- (~25 min) implement H6: re-introduce AllocatePages-from-cpuinit
+  with RaiseTPL/RestoreTPL bracketing + allocFallback path +
+  rebuild + smoke. Get the new RIP signature
+  `0x56575441_E5894855` with RCX=TPL_NOTIFY and R11=RaiseTPL
+  slot — proving the crash is in RaiseTPL, not AllocatePages.
+- (~10 min) revert H6 (ship state = H5 bare-metal cpuinit +
+  hwinit1 probe), confirm matrix, commit + push.
+- (~10 min) draft this § 15.
+
