@@ -845,3 +845,255 @@ clear 'rt0 zero-init regression remaining' + push WIP + propose
 next investigation" rule, that is exactly what this section
 documents.
 
+## 13. R-amd64c — ConOut markers + SP-alignment probe (2026-06-10)
+
+### 13.1 Goals (per § 12.6)
+
+1. ConOut debug markers at 4 critical points in `cpuinit_amd64.s`
+   (post-AllocatePages, post-REP-STOSB, post-SP-setup,
+   pre-JMP-rt0) to localise the crash step.
+2. Test `SUBQ $8, SP` between SP setup and JMP for hypothesis 2
+   (MS x64 alignment at rt0 entry).
+3. Inspect `firstmoduledata` GC bitmap layout for hypothesis 1.
+4. Re-run amd64 smoke matrix; merge WIP if green.
+
+### 13.2 ConOut marker infrastructure — built, but UNUSABLE pre-AllocatePages
+
+- Added `cpuinitMarker0..E = [5]uint16{c, '\r', '\n', 0}` package
+  globals in `uefiboard/board.go` (5 × 10 bytes data section
+  overhead).
+- Added a `printChar` NOSPLIT|NOFRAME helper TEXT in
+  `cpuinit_amd64.s` that:
+  - Stashes the caller's SP in a memory slot (`·cpuinitSavedSP`,
+    NOT in RBX — see § 13.4 below).
+  - Reserves a 32-byte MS x64 shadow space, force-aligns SP to
+    16-mod-16, calls `*(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL +
+    OutputString = +0x08)` via two register loads.
+  - Restores SP from memory and RETs.
+- Added 5 marker call sites in cpuinit (`@` post-conOut-capture,
+  `A` post-AllocatePages, `B` post-REP-STOSB, `C` post-SP-setup,
+  `D` pre-JMP-rt0, `E` in the allocFail path).
+
+**Outcome: ZERO markers appear on `-serial stdio`** even when the
+binary's HLT-at-entry probe (§ 13.3) PROVES `cpuinit` is reached.
+The crash signature shifts predictably with `.text` layout:
+without markers the RIP-on-fault is `0x55415641E5894855`
+(`push rbp; mov rbp,rsp; push r14; push r13`), with marker code
+linked it changes to `0x56575441E5894855`
+(`push rbp; mov rbp,rsp; push r12; push rdi; push rsi`) — the byte
+patterns of two different Go-emitted function prologues, popped
+off the stack by a RET that found garbage at SP.
+
+Conclusion: the ConOut OutputString call itself is unsafe when
+invoked from `cpuinit` on the firmware-supplied stack. The most
+likely cause: firmware hands the entered image a small stack
+(observed empirically by walking EDK2 source: `LoaderEntry` →
+`StartImage` allocates a small per-image stack), and
+OutputString's deeply-nested path (terminal-emulation tab/cursor
+handling + the EFI shell's PageBreak machinery + ConSplitter's
+fanout to every output console) overflows it, corrupting the
+return-address area we're standing on. Symptom: the printChar RET
+pops garbage as RIP → #GP into non-canonical address whose byte
+pattern matches Go function prologues.
+
+The marker infrastructure is therefore REMOVED from the shipped
+`cpuinit_amd64.s` in this sprint; a single-line comment in
+`board.go` points future debug sprints at the QEMU 0x402
+isa-debugcon port (one OUTB instruction, no firmware-side stack
+consumption) as the correct primitive for pre-AllocatePages
+tracing.
+
+### 13.3 HLT-at-entry probe — proved cpuinit IS reached
+
+Substituting `HLT; JMP -1(PC)` for the very first cpuinit
+instruction caused QEMU to hang (no #GP, no exception, the
+TIMEOUT-induced TERM at 20s being the only kill signal). This
+proves the firmware DOES call our PE entry, and the crash is
+NOT in the firmware's LoadImage/StartImage path.
+
+Substituting the same HLT just AFTER the ConOut capture (post
+`MOVQ AX, ·conOut(SB)`) also hung — so cpuinit reaches at least
+that point.
+
+Substituting it for the FIRST `CALL printChar` showed the same
+hang — but UN-substituting (so the CALL fires) reproduced the
+#GP. This pins the failure to the printChar CALL/RET pair, not
+to any post-CALL state we set up.
+
+### 13.4 RBX-clobber discovery
+
+While iterating printChar, an interim design saved the caller's
+SP in RBX (callee-saved under MS x64), reasoning that RBX would
+be undisturbed across OutputString. The resulting `MOVQ BX, SP`
+yielded the SAME garbage-RIP #GP — RBX was NOT preserved by
+OVMF's OutputString. The post-fault register dump showed
+RBX = `0x000000007FE3D990` (a pointer into the firmware's
+exception-handler stack region, NOT the heap), confirming OVMF
+wrote into RBX during the call.
+
+Workaround: stash the SP in a memory slot
+(`var cpuinitSavedSP uint64`) instead of a register. (Now also
+removed along with the rest of the marker infrastructure, but
+documented here as a permanent caveat: **do NOT rely on RBX
+preservation across ANY OVMF Boot Services call**, even though
+MS x64 promises it.)
+
+### 13.5 SP-alignment nudge — kept as a 1-instruction defensive
+
+Added `SUBQ $8, SP` between the SP-setup arithmetic and the JMP
+to `runtime·rt0_amd64_tamago`. In ONE probe variant (cpuinit
+carrying the full marker0+printChar+marker-A..D pre-JMP code,
+yielding a ~96-byte .text bump that shifted later functions),
+this nudge appeared to flip HTTP-original from FAIL to PASS.
+Reproducing the same PASS in the cleaned variant (marker code
+removed) failed: HTTP-original is back to FAIL with the same
+`0x55415641E5894855` Go-prologue RIP.
+
+So the apparent fix was a coincidence of `.text` layout: the
+SUBQ $8 alignment hypothesis is NOT confirmed. The SUBQ $8 is
+KEPT in the shipped cpuinit as a 1-byte-cost defensive against
+Go amd64 ABIInternal's "SP+8 = 16-mod-16 at CALL site" assumption
+that the runtime's compiled Go code may make, but it is
+NOT the root-cause fix.
+
+### 13.6 Smoke matrix — final amd64 state
+
+Against patched OVMF (`edk2-stable202605`), 2026-06-10:
+
+| ROW         | MODE     | R-amd64b | R-amd64c (shipped) |
+|-------------|----------|----------|--------------------|
+| HTTP        | original | FAIL #GP | FAIL #GP           |
+| HTTP        | packed   | FAIL #GP | FAIL #GP           |
+| HTTPS       | original | FAIL #GP | FAIL #GP           |
+| HTTPS       | packed   | FAIL #GP | FAIL #GP           |
+| OCI         | original | FAIL #GP | FAIL #GP           |
+| OCI         | packed   | FAIL #GP | FAIL #GP           |
+| EFIHANDOVER | original | FAIL #GP | FAIL #GP           |
+| EFIHANDOVER | packed   | FAIL #GP | FAIL #GP           |
+
+Net change from R-amd64b: **none**, on the shipped tree. The
+SP+8 nudge survives but is not sufficient. The marker
+infrastructure is removed (its OutputString CALL was actively
+the fault source, not the crash already in cpuinit).
+
+### 13.7 Findings + revised hypotheses
+
+#### What we KNOW after R-amd64c
+
+1. **cpuinit IS entered on every probe binary.** HLT-at-entry
+   hangs cleanly; firmware loads and starts the image
+   correctly. R-amd64a § 11.3's "stack-spill into MMIO" pattern
+   was the SYMPTOM, not the disease: the actual fault is RET
+   popping a Go-function-prologue byte sequence as a return
+   address.
+2. **OVMF clobbers RBX across OutputString** despite MS x64
+   promising callee-save. Any further amd64 work that calls
+   into Boot Services pre-AllocatePages MUST not stash state
+   in any general-purpose register — use a memory slot.
+3. **The firmware-supplied stack at PE entry is small.**
+   A single OutputString CALL was enough to overflow it
+   (manifesting as RET-into-garbage), proving we have << 4 KiB
+   of headroom from the firmware.
+4. **The crash pattern is .text-layout-sensitive.** Bumping
+   `.text` by 96 bytes (the marker0+printChar code) changed the
+   crash RIP from one Go-prologue byte pattern to a different
+   one. This points to a corrupted POINTER, not corrupted CODE
+   — something dereferences a stale address that points
+   somewhere inside .text, then misinterprets the .text bytes
+   as a return address.
+
+#### Revised hypotheses for R-amd64d
+
+H1 (highest confidence). **`firstmoduledata` GC bitmap pointers
+are corrupt because `Bloc = heapBase` lies OUTSIDE the binary's
+loaded address range.** When `osinit` skips `initBloc` (because
+`goos.Bloc != 0`), it leaves `firstmoduledata.{noptrdata, data,
+bss, noptrbss}` pointing at addresses CLOSE TO the binary's
+loaded base (e.g. `0x7D1A_xxxx`), while `Bloc / blocMax` are
+anchored at the AllocatePages-returned base (e.g. `0x28000000`).
+The GC's "is this pointer in heap?" check uses Bloc/blocMax;
+the typed-pointer scan uses firstmoduledata.{data,bss,...}.
+These two regions don't overlap, and runtime invariants likely
+assume they do. The corruption manifests later as a function
+pointer's bytes (not address) appearing on the stack.
+
+**R-amd64d probe**: dump `firstmoduledata.data`, `.edata`,
+`.bss`, `.ebss`, `.gcdata`, `.gcbss`, `.text`, `.etext` on the
+arm64 PASS path AND on the amd64 FAIL path, compare. arm64
+shows the same Bloc-vs-firstmoduledata split, so if it works
+there, the difference is in some amd64-specific runtime path.
+
+H2 (medium). **`runtime·rt0_amd64_tamago` line 20's
+`LEAQ (-64*1024)(SP), AX` sets g0.stack.lo to `heapBase + 128MiB
+- 1MiB - 64KiB`, which is INSIDE the heap region.** The runtime
+then uses g0.stack.lo as the bottom of the istack. Later
+allocations from sbrk (per `mem_tamago.go:15`) check
+`bl+n > uintptr(g0.stack.lo)` to refuse growth. With our
+RamSize=128MiB, the gap is `128MiB - 1MiB - 64KiB ≈ 127MiB` of
+usable heap before sbrk runs out — should be plenty, but
+verifying that no early `mallocinit` allocation tries to grab
+> 127MiB worth of contiguous arena is worth a single
+`println(g0.stack.lo, bloc, blocMax)` early in `osinit`.
+
+H3 (lower). **MS x64 ABI alignment somewhere DEEPER than rt0
+entry.** Our SUBQ $8 didn't fix it alone, but maybe rt0's own
+internal calls to `runtime.settls` / `runtime.check` see a
+different mis-alignment that one nudge can't address. Probably
+chase via objdump of `runtime.check` itself looking for any
+`MOVDQA / MOVAPS / VMOVAPS` instruction with a stack-relative
+addressing mode.
+
+### 13.8 Concrete R-amd64d plan
+
+1. **Use QEMU's isa-debugcon port (0x402) for pre-runtime
+   tracing**, not ConOut. Add `-debugcon file:/tmp/dbg.out
+   -global isa-debugcon.iobase=0x402` to the smoke runner;
+   replace `printChar` with `OUTB AL, $0x80` (or 0x402).
+   ONE single instruction, no firmware stack consumption.
+   The hex byte appears in `/tmp/dbg.out`.
+2. **Bring up an amd64 host-side print harness** that links a
+   minimal `mallocinit`-only program (no schedinit) — if
+   THAT crashes, the issue is mallocinit. If it doesn't, the
+   issue is in schedinit / the M/G goroutine initialisation
+   path.
+3. **Cross-check `firstmoduledata` on arm64 vs amd64**: write
+   a small tamago Go program that prints `firstmoduledata.data,
+   edata, bss, ebss, end, gcdata, gcbss` from `init()` and run
+   it on both arches. Compare to runtime.Bloc / blocMax for
+   both. The amd64 mismatch (if any) is the bug.
+4. **Tamago-pie patch (LOCAL, do not push)**: change
+   `runtime.rt0_amd64_tamago` to zero-init the bootstack and
+   add an explicit argc=0/argv=NULL frame. Document the patch
+   in `cloud-boot/docs/tamago-pie-amd64-rt0-zeroinit.patch`.
+
+### 13.9 What shipped this sprint
+
+- **`uefiboard/cpuinit_amd64.s`**: stripped of the marker
+  infrastructure; SP+8 nudge KEPT as a 1-instruction defensive;
+  full comment block documenting the R-amd64c findings and
+  why the nudge alone is not the root-cause fix.
+- **`uefiboard/board.go`**: marker globals removed; replaced
+  with a 1-paragraph comment block pointing future debug
+  sprints at the QEMU isa-debugcon port.
+- No tamago-pie patch shipped (the H1/H2/H3 root-cause work
+  needs the debugcon probe before any patch can be designed).
+- WIP branch `m6-2-pr2-amd64-wip-r-amd64b` stays distinct
+  from main; smoke matrix is still all-FAIL on amd64, so
+  the merge gate remains closed.
+
+### 13.10 Time accounting
+
+Sprint cap 120 min. Spent ~120 min on:
+- (~10 min) read R-amd64a § 11 + R-amd64b § 12, understand WIP
+  branch state.
+- (~25 min) design and ship the marker0..E + printChar
+  infrastructure.
+- (~30 min) iterate marker visibility (ConOut OutputString
+  never produced output despite cpuinit being reached;
+  diagnosed via HLT-at-entry probe).
+- (~20 min) chase the RBX-clobber regression (printChar's BX
+  stash → garbage SP → garbage RIP).
+- (~15 min) SUBQ $8 alignment test + variant matrix.
+- (~20 min) strip the marker code back out and document
+  findings in this § 13.
+
