@@ -1598,3 +1598,43 @@ Sprint cap 120 min. Spent ~115 min on:
   hwinit1 probe), confirm matrix, commit + push.
 - (~10 min) draft this § 15.
 
+
+## § 15.A — Multi-agent operational pattern: sibling worktrees
+
+R-amd64e's transcript captured a repeating coordination failure: two parallel
+amd64-debug agents both checkout-and-modify the same `tamago-uefi` working
+tree. Each agent's `git switch` flips the branch under the other agent's
+in-progress build, producing spurious link errors and silently corrupted
+incremental builds. The R-amd64e author worked around it by manually
+spinning up `~/Documents/VCS/GIT/github.com/cloud-boot/tamago-uefi-r-amd64e/`
+as a sibling git worktree.
+
+Adopted as the standard pattern for any concurrent amd64-debug sprint.
+Helper: `internal/scripts/worktree-amd64.sh <sprint-suffix>`.
+
+Example — launching two amd64 sprints in parallel without conflict:
+
+```sh
+cd ~/Documents/VCS/GIT/github.com/cloud-boot/tamago-uefi
+./internal/scripts/worktree-amd64.sh r-amd64f   # creates ../tamago-uefi-r-amd64f
+./internal/scripts/worktree-amd64.sh r-amd64g   # creates ../tamago-uefi-r-amd64g
+# Agent A works in ../tamago-uefi-r-amd64f on branch m6-2-pr2-amd64-wip-r-amd64f
+# Agent B works in ../tamago-uefi-r-amd64g on branch m6-2-pr2-amd64-wip-r-amd64g
+# Original tamago-uefi/ tree on main remains untouched for inline / non-amd64 work
+```
+
+Cleanup when done:
+
+```sh
+git worktree remove ../tamago-uefi-r-amd64f
+git branch -D m6-2-pr2-amd64-wip-r-amd64f   # if not pushed / not needed
+```
+
+The worktree shares the same `.git` (no clone duplication), but each has
+its own working tree files + branch checkout. This means each agent's
+`go build` produces its own `*.elf` / `*.efi` outputs independently, and
+neither agent's `git status` shows the other's WIP.
+
+This pattern generalises to any sprint where multiple agents need
+exclusive working-tree control. Per-sprint cost is one `git worktree add`
+(~1 second) and ~50 MiB of disk for the parallel checkout.
