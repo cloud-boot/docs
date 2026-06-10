@@ -4021,6 +4021,110 @@ runner log, but the **pre-EBS abort chain is fully unblocked**.
 - `kernelboot_arm64.go` — refresh R-M8.8a doc block (CLOSED).
 - `cloud-boot/docs/tamago-uefi-phase2-oci-loader.md` — this entry.
 
+### M9.0 — DHCP option 67 → OCI fetch → HCL parse (SHIPPED 2026-06-09)
+
+Foundation for the DHCP-discovered boot menu (PR-style commit
+[tamago-uefi@1780767](https://github.com/cloud-boot/tamago-uefi/commit/1780767)).
+`phase2_dhcp_oci_menu.go` walks DHCP option 67 (Bootfile-Name fallback),
+parses as an OCI ref, streams the manifest's first layer through
+`oci.FetchBlobStream` + SHA-256, hands the bytes to `bootmenu.Parse`,
+prints the parsed `*BootConfig` to ConOut, halts. No rendering, no
+input, no dispatch — those land in M9.1 + M9.2.
+
+### M9.1 — virtio-console open + Renderer (SHIPPED 2026-06-10)
+
+Renders the parsed `*BootConfig` as an interactive ASCII-framed menu
+over an `io.Writer` sink. Production sink is `*vconsole.VirtioConsole`
+(go-virtio/console v0.1.0); fallback sink is a `uefiboard.ConOutWriter`
+that routes per-byte through the existing `printk` path so the menu is
+still visible on bare-ConOut runners (no `-device virtio-serial-pci`).
+
+Wire-up:
+- `uefiboard/virtio_console_uefi.go` — `OpenVirtioConsole(pciIO)` and
+  `LocateVirtioConsolePciIO()` mirror the virtio-net helpers.
+- `uefiboard/conout_writer.go` — `ConOutWriter{}` zero-value `io.Writer`.
+- `uefiboard/bootmenu/render.go` — `Renderer{Out, Width}` with `Render`
+  emitting a self-contained ANSI cursor-home + erase-screen + frame
+  per call so a real terminal does an in-place redraw. ASCII framing
+  (`+----+ | > entry |`) for universal terminal + firmware-font
+  compatibility.
+
+Note (R-M9.1a, NEW): EDK2 stable202408 on QEMU arm64 virt does not
+surface the virtio-console subdevice as PCI device 0x1043 through
+`EFI_PCI_IO_PROTOCOL` even when `-device virtio-serial-pci -device
+virtconsole` is wired. The locator falls through and the ConOut sink
+is used. The ConOut path renders correctly (no ANSI interpretation —
+the firmware just writes the escape bytes as raw chars; the menu
+scrolls each redraw instead of redrawing in place). The virtio-console
+path is exercised end-to-end by the host-side renderer tests
+(`render_test.go` writes into a `bytes.Buffer`).
+
+Tests:
+- `uefiboard/bootmenu/render_test.go` — first-frame ANSI prologue,
+  selection cursor moves between frames, countdown-zero suppression,
+  long-label truncation, clamp-out-of-range, default-width sanity,
+  nil-sink error path, write-error propagation.
+
+### M9.2 — EFI_SIMPLE_TEXT_INPUT_PROTOCOL + menu loop + dispatch (SHIPPED 2026-06-10)
+
+Adds `uefiboard.ReadKeyNonblocking()` (and `ResetConIn`) over
+`gST->ConIn->ReadKeyStroke` at SystemTable offset 48. Returns
+`Keystroke{ScanCode, UnicodeChar}` on success, `ErrNoKey` on
+EFI_NOT_READY, `ErrNoConIn` if `gST->ConIn` is NULL.
+
+Menu loop in `runDHCPOCIMenuProbe`:
+1. Drain stale ConIn via `ResetConIn(false)`.
+2. Seed the cursor at `indexOfDefault(cfg)`.
+3. Per-tick: `Render` → `ReadKeyNonblocking` → either dispatch
+   (Enter/auto-boot), halt (ESC), advance cursor (Up/Down/Home/End),
+   or `busyWait(100ms)` and continue.
+
+Auto-boot: armed only when `cfg.Timeout > 0` AND `cfg.Default != ""`.
+Any keystroke disarms it (pushes deadline 24h ahead).
+
+R-M9.2a (NEW, DOCUMENTED) — `time.Sleep` blocks past its deadline in
+the single-goroutine M9.2 menu loop. Same root cause as the
+ministack "drive RX inline" pattern (commits 91364cf, 8c86f35) and
+the R-M8.3b io.Pipe deadlock: TamaGo+UEFI has no async preemption,
+so when no concurrent goroutine drives the timer wheel, the parked
+goroutine never wakes. Workaround: `busyWait(d)` spin-checks
+`time.Now()` until the deadline. Costs ~10% of one core for the
+inter-tick wait — acceptable; the menu loop runs for at most
+`cfg.Timeout` seconds before dispatching.
+
+Dispatch: `bootEntry(entry, s, dns)` mirrors `runKernelBootLinuxKernel`
+from `phase2_oci_kernel_boot.go` — `streamExtractVmlinuzMenu`
+(buffered gunzip+tar over the OCI layer), DTB publish, UninstallAllRNG,
+LoadImage, SetLoadOptions(cmdline), optional PublishInitrd, StartImage.
+Local-named helpers (`*Menu` suffix) so a hypothetical "both tags set"
+build doesn't double-define.
+
+Files:
+- `uefiboard/text_input.go` + `_tamago.go` + `_test.go` — Keystroke
+  type, scan-code constants, `ReadKeyNonblocking`, `ResetConIn`.
+- `uefiboard/conout_writer.go` — host-fallback renderer sink.
+- `uefiboard/virtio_console_uefi.go` — virtio-console open + locator.
+- `uefiboard/bootmenu/render.go` + `render_test.go` — Renderer.
+- `phase2_dhcp_oci_menu.go` — rewired runDHCPOCIMenuProbe + menuLoop
+  + bootEntry + streamExtract/fetchInitrd local copies.
+- `internal/livedhcpocimenu/run.sh` — added M9.2 gates
+  ("auto-boot countdown expired", "bootEntry: kernel_ref"); accepts
+  `M9_LIVE_NOAUTO=1` to skip the dispatch gate for interactive runs.
+- `Taskfile.yaml` — new `dhcpocimenu:live:arm64:interactive` task.
+- `go.mod` — `github.com/go-virtio/console v0.1.0` added.
+
+Live test (arm64): `task dhcpocimenu:live:arm64` PASS:
+- M9.0: "lease acquired", "bootfile-name = ttl.sh/...",
+  "parsed BootConfig", "title = cloud-boot M9.0 smoke menu".
+- M9.1: ASCII frame painted with ">" cursor on alpine-latest +
+  countdown line "Auto-boot in 9s -- press any key to stay".
+- M9.2: "auto-boot countdown expired; dispatching: alpine-latest",
+  "bootEntry: kernel_ref = ghcr.io/myorg/alpine-kernel:latest",
+  "bootEntry FAIL: Authenticate(kernel): ... unexpected status 403"
+  (the live HCL fixture's ghcr.io/myorg refs are intentionally fake —
+  the gate is "dispatch reached the per-entry fetcher with the right
+  kernel_ref", not "kernel actually booted").
+
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
