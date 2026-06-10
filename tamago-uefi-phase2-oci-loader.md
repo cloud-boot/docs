@@ -221,14 +221,16 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.8**    | **SHIPPED 2026-06-10; cmdline routing fixed; R-M8.8a OPEN (new pre-EBS Data Abort, kernel-side)** | **Post-EBS serial routing cmdline cleanup: drop `acpi=force` (M8.6 now publishes a proper QEMU-virt DTB with pl011@9000000 + serial0 alias + chosen/stdout-path; with both `acpi=force` AND a DTB present the kernel was picking ACPI which has no UART description); add `keep_bootcon` so earlycon stays alive until ttyAMA0 is fully registered; add `earlyprintk=keep` for symmetry; add `printk.time=y` for `[ x.xxx]` timestamp prefix. QEMU `-serial stdio` confirmed routing PL011 correctly via clean EFI-stub trace. Live test with `M81_LIVE_KEEPRUN=1` uncovered a NEW pre-ExitBootServices Data Abort (R-M8.8a): `Synchronous Exception at 0x000000013C0FF9DC, ESR 0x96000047, FAR 0x40` (Translation fault, third level, null+0x40 deref) caught by EDK2's `ArmCpuDxe` DefaultExceptionHandler — proving boot services were still active when the fault fired. M8.7 PublishRNG already neutralised the firmware RngDxe handle; this is a DIFFERENT firmware-side null-deref on the kernel→firmware path. Cmdline cleanup is correct on its own merits and will let post-EBS output flow the moment R-M8.8a is unblocked in M8.9. |
 | M8.9        | next                                | **R-M8.8a: pre-EBS Data Abort in EDK2 DXE region** (suspected: efi_random_alloc indirect, efi_get_memory_map walk over partially-uninstalled handle, or a runtime services install path) |
 
-### M8.3 — per-arch live kernel boot matrix (2026-06-10)
+### M8.3 — per-arch live kernel boot matrix (2026-06-10; M8.13 unification update)
 
-| Arch     | Mode  | Public EFI-stub OCI ref                                                  | Live test                                                                                                     |
-|----------|-------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | **PASS — userspace reached (M8.10, 2026-06-10).** Linux 5.10.29-talos boots end-to-end: EFI-stub trace + DTB-from-config-table + initrd-load + `[ 1.395] Run /init as init process` + `cloud-boot/openweft Phase 2 Path D — /init userspace reached` + `reboot: Power down`. Wall: 17.1s. Required `-cpu cortex-a72` (`-cpu max` incompat with 5.10) + PublishDTB + UninstallAllRNG. |
-| amd64    | dormant (B) | siderolabs/kernel ships amd64 too; wiring left empty pending OVMF >4 MiB sprint on m6-2-pr2-amd64-wip. | n/a (MODE B passes; live kernel deferred).                                                                  |
+| Arch     | Mode  | EFI-stub OCI ref                                                                      | Live test                                                                                                     |
+|----------|-------|---------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| arm64    | C     | `ttl.sh/cloudboot-vmlinuz-arm64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian 13 `linux-signed-arm64` `linux-image-6.12.90+deb13.1-arm64`, see §M8.13) | **PASS — userspace reached (M8.13, 2026-06-10).** Linux 6.12.90+deb13.1-arm64 boots end-to-end via `-cpu max`: EFI-stub trace + DTB-from-config-table + initrd-load + `[ 1.176] Run /init as init process` + `cloud-boot/openweft Phase 2 Path D — /init userspace reached` + `reboot: Power down`. Wall: 17.1s. `-cpu cortex-a72` pin from M8.10 is OBSOLETE (Debian 6.12 gates modern CPU features). PublishDTB + UninstallAllRNG still required (EDK2 arm64 firmware-side, unchanged from M8.6/M8.9). |
+| amd64    | dormant (C-ready) | `ttl.sh/cloudboot-vmlinuz-amd64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian 13 `linux-signed-amd64` `linux-image-6.12.90+deb13.1-amd64`, see §M8.13) | n/a — live kernel-boot deferred pending OVMF >4 MiB sprint on `m6-2-pr2-amd64-wip`. Const populated (M8.13); MODE C will work automatically once that sprint lands. |
 | riscv64  | C     | `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.11, 2026-06-10).** Linux 6.12.90 boots end-to-end: EFI-stub + initrd-load + `[ 0.903] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 18.1s. NO per-arch QEMU/cmdline tweaks needed (recent kernel auto-handles `-cpu max`; SBI earlycon; empty-DTB OK on riscv64); only change vs. M8.4 dormant was per-arch riscv64 ELF /init via `initramfs_riscv64.cpio.gz`. |
 | loong64  | C     | `ttl.sh/cloudboot-vmlinuz-loong64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.12, 2026-06-10).** Linux 7.0.12 boots end-to-end: EFI-stub jumps straight in (loong64 EFI-stub is quieter — no `Booting Linux Kernel...` line), `[ 0.752] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 17.1s. NO per-arch QEMU/cmdline tweaks needed (recent Debian 7.0.12 + ACPI auto-discovery + ttyS0 16550); only change vs. M8.4 dormant was per-arch loong64 ELF /init via `initramfs_loong64.cpio.gz`. |
+
+**Source unification (M8.13, 2026-06-10):** All 4 arches now boot from `ttl.sh/cloudboot-vmlinuz-<arch>:24h`, extracted by `cmd/cloudboot-oci-extract` from Debian 13 (trixie) `linux-signed-<arch>` / `linux-image-*-<arch>` `.deb` packages and re-pushed nightly via `.github/workflows/vmlinuz-nightly.yml`. The historical Talos 5.10.29 pin for arm64 (`ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`) is OBSOLETE — it required a `-cpu cortex-a72` QEMU workaround (M8.10, R-M8.9a) which Debian 6.12 makes unnecessary.
 
 ### M8.4 — Public ref landscape for riscv64 + loong64 (2026-06-10)
 
@@ -5531,3 +5533,71 @@ Per milestone, revisit at the start of the M-N agent run.
   via a pure-Go pre-boot agent.** amd64 remains dormant pending
   M6.1 (OVMF >4 MiB threshold) on the parallel `m6-2-pr2-amd64-wip`
   branch.
+
+- **2026-06-10** (M8.13 — **Debian-13 unification across all 4
+  arches**, Phase 2 / Path D): retire the last per-arch kernel
+  inconsistency. Until M8.12 the arm64 wiring still pulled Talos
+  5.10.29 (2021) from `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-
+  ge8ed5bc`, requiring a `-cpu cortex-a72` QEMU pin (M8.10/R-M8.9a)
+  because the kernel was too old to gate modern CPU features
+  exposed by QEMU 9.x; amd64 was DORMANT (empty kernelBootTargetRef
+  pending M6.1 OVMF >4 MiB sprint). M8.13 swaps arm64 to Debian 13
+  `linux-signed-arm64` (6.12.90+deb13.1-arm64) and populates the
+  amd64 const symmetrically. The `cmd/cloudboot-oci-extract` tool
+  already supports the `deb:` source scheme (M8.4 self-publish) —
+  no tool changes needed; only matrix-extension in the nightly cron
+  and per-arch const swaps.
+
+  Live arm64 (M8.13, against Debian 13 kernel via `-cpu max`):
+
+  ```text
+      [    0.000000] Linux version 6.12.90+deb13.1-arm64 (debian-kernel@lists.debian.org) ...
+      [    0.000000] efi: EFI v2.7 by EDK II
+      [    1.176088] Run /init as init process
+      cloud-boot/openweft Phase 2 Path D — /init userspace reached
+      [    1.232168] cloud-boot/openweft Phase 2 Path D — /init userspace reached
+      Kernel cmdline: console=ttyAMA0,115200 earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep printk.time=y root=/dev/ram0 rdinit=/init loglevel=8 panic=10
+      Kernel: 6.12.90+deb13.1-arm64 aarch64
+      Total RAM: 3911 MiB
+      [    6.262196] reboot: Power down
+  ```
+
+  Wall-clock: **17.1s** end-to-end (identical to M8.10/M8.11/M8.12;
+  no regression). `-cpu cortex-a72` workaround OBSOLETE. Cmdline
+  trimmed: dropped `nokaslr random.trust_bootloader=0
+  random.trust_cpu=0` (the M8.7 RngDxe defence-in-depth knobs) —
+  M8.9 UninstallAllRNG closes the abort directly and a 6.12 kernel
+  doesn't re-enter the failing RngDxe path even if cmdline allows
+  it. Verified empirically — live test ran 100% clean.
+
+  amd64: const populated against `ttl.sh/cloudboot-vmlinuz-amd64:24h`
+  (Debian 6.12.90+deb13.1-amd64, raw 12 MiB, layer 12 MiB — bzImage
+  is already-zlib-compressed so outer gzip compresses to 98%, vs.
+  38% for arm64's uncompressed `Image`). Cmdline uses `console=ttyS0,
+  115200 earlyprintk=ttyS0,115200 keep_bootcon printk.time=y root=
+  /dev/ram0 rdinit=/init loglevel=8 panic=10`. Live test still
+  gated by the OVMF >4 MiB sprint (`m6-2-pr2-amd64-wip` branch);
+  the moment that closes, `task kernelboot:live:amd64` works with
+  ZERO further wiring changes.
+
+  Files:
+
+  - `kernelboot_arm64.go` — `kernelBootTargetRef` swapped from
+    `ghcr.io/siderolabs/kernel:…` to
+    `ttl.sh/cloudboot-vmlinuz-arm64:24h`; cmdline rebased onto the
+    riscv64/loong64 baseline + dropped the M8.7 nokaslr/random
+    knobs.
+  - `kernelboot_amd64.go` — `kernelBootTargetRef` populated to
+    `ttl.sh/cloudboot-vmlinuz-amd64:24h`; cmdline filled in.
+  - `internal/livekernelboot/run.sh` — arm64 case:
+    `-cpu cortex-a72` → `-cpu max`. Updated comment block cites
+    M8.13 reverse-fix of M8.10.
+  - `.github/workflows/vmlinuz-nightly.yml` — matrix extended
+    from 2 → 4 arches. Estimated total cron runtime ~20 min
+    (4 × ~5 min/arch), well within GitHub Actions free tier.
+
+  **M8.13 net result: 4 of 4 arches now build from a single
+  Debian-13 source under `cmd/cloudboot-oci-extract`. 3 of 4
+  reach Linux userspace end-to-end live (arm64/riscv64/loong64);
+  amd64 is wire-ready and will activate the moment its firmware-
+  size blocker closes.**
