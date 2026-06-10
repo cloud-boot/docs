@@ -205,7 +205,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
 | M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
 | M6.2 PR2    | **ALL 4 ARCHES GREEN 2026-06-10** — R-amd64a..g saga CLOSED. amd64 unblock = R-amd64f #2 (heap via .bss reservation, skip Boot Services in cpuinit) + R-amd64g (12-line MOVQ to write runtime/goos.Bloc in cpuinit_amd64.s). Merged to main (tamago-uefi@2b2faa1 + go-coff/efipack@2e96601). See `m6-2-edk2-upstream-investigation.md` §§ 11-15 for the full chase. | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
-| **M6.2**    | **SHIPPED (4/4 arches) 2026-06-10** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3). amd64 LIVE on M5+M8.0+EFIHANDOVER; OCI/HTTPS rows hit clean application-level ghcr.io network timeouts (env, not firmware/runtime). |
+| **M6.2**    | **SHIPPED (4/4 arches) 2026-06-10** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3). amd64 LIVE on M5+M8.0+EFIHANDOVER; OCI/HTTPS rows initially hit clean application-level ghcr.io network timeouts (env, not firmware/runtime) — addressed 2026-06-10 by the **Network reliability fix** (see Network track entry below): `ministack.DialTCP4WithRetry` + `DialTLSWithRetry` (retry-with-exponential-backoff, default 3 attempts × baseDelay 2 s doubled). |
 | M6.2 PR4    | **SHIPPED 2026-06-09 (host-side)**  | LZFSE codec wired in `efipack v0.2.0` + `pectl v0.3.0`; runtime stubs still flate-only (deferred) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
@@ -2012,7 +2012,7 @@ Consolidated live smoke matrix (QEMU 9.2.0 + EDK2, `-netdev user`):
 | arm64   | PASS (3.17→2.72 MiB) | PASS (4.45→3.29 MiB) | _baseline (rerun pending)_ | _baseline (rerun pending)_ |
 | riscv64 | PASS (2.85→2.68 MiB) | PASS (4.30→3.26 MiB) | PASS (4.62→3.39 MiB) | PASS (1.98→2.55 MiB) |
 | loong64 | PASS (3.13→2.85 MiB) | PASS (4.74→3.45 MiB) | PASS (5.10→3.58 MiB) | PASS (2.16→2.74 MiB) |
-| amd64   | **deferred** — runtime crash inside stub; tracked on `m6-2-pr2-amd64-wip` branch | — | — | — |
+| amd64   | PASS (post R-amd64a..g) | PASS (post R-amd64a..g + network-retry fix 2026-06-10) | PASS / clean retry-exhausted error (post R-amd64a..g + network-retry fix 2026-06-10) | PASS (post R-amd64a..g) |
 
 Sizes are `(original on-disk) → (packed envelope on-disk)`. The
 EFIHANDOVER row on riscv64/loong64 is mildly anti-compressed because
@@ -2041,6 +2041,66 @@ to the resolved IP, runs a real TLS handshake with cert-chain
 verification against the embedded bundle, prints `HTTP/1.1 200 OK`,
 content length 528, and the first 64 bytes of the body
 (`<!doctype html>...`).
+
+#### M6.2 / Network track — ministack dial retry-with-exponential-backoff (SHIPPED 2026-06-10)
+
+Closing the **network reliability gap** R-amd64g exposed. With the
+firmware/runtime bug saga finally closed (R-amd64a..g — see § M6.2
+"R-amd64 sequence"), the amd64 OCI/HTTPS rows of the smoke matrix
+started reproducing intermittent `ministack: TCP operation timed
+out` against `ghcr.io`. Cause: ministack's M5/M6 dial path was
+single-shot by design; the public registry is not (one or both
+attempts of "dial TCP" or "TLS handshake" can fail under tamago+UEFI
+on QEMU NAT inside the 10 s default, succeeding cleanly on a second
+attempt over the same wall-clock window).
+
+Shipped:
+
+- `uefiboard/ministack/dial_retry.go` (BSD-3, pure Go) — new file:
+  - `Stack.DialTCP4WithRetry(dst, port, timeout, attempts, baseDelay)`
+  - `Stack.DialTLSWithRetry(host, port, dns, timeout, attempts, baseDelay)`
+  - `isRetryableDialError(err)` — classifies transient vs deterministic.
+  - `ErrDialAttemptsExhausted` — wraps the last per-attempt error
+    (preserves `errors.Is(err, ErrTCP4Timeout)` semantics through
+    `Unwrap`).
+- `Stack.DefaultDialAttempts` + `Stack.DefaultDialBaseDelay` knobs
+  added (defaults: 3 attempts × 2 s base; backoff schedule
+  2 s + 4 s = 6 s of inter-attempt sleep across a 3-attempt run).
+- The existing `Stack.DialTCP4` and `Stack.DialTLS` now route through
+  the retry path by default. Callers that want strict single-shot
+  set `Stack.DefaultDialAttempts = 1` (a handful of unit tests do
+  this so a deliberate failure case doesn't spend 6 s sleeping
+  between attempts).
+- Retry classification (per RFC 9112 §9.5 + transport hygiene):
+  - **Retry**: `ErrTCP4Timeout`, `ErrDNSTimeout`, TLS handshake
+    timeout / EOF mid-handshake, ARP timeout, unknown transport
+    errors (fail-open: better to spend a stray retry than miss a
+    transient flake).
+  - **Don't retry** (deterministic): cert validation
+    (`tls.CertificateVerificationError`, `x509.UnknownAuthorityError`,
+    `x509.HostnameError`, `x509.CertificateInvalidError`),
+    `ErrTCP4ConnRefused` (RST = clean "no" from peer),
+    `ErrTLSNoServerName` / `ErrTCP4InvalidAddr` /
+    `ErrDNSInvalidServer` / `ErrIPv4InvalidIP` (caller-bug),
+    `ErrStackClosed`, `ErrTCP4NoLocalAddr`.
+- Tests: 17 new in `dial_retry_test.go`, exercising every branch
+  of the classifier, the exponential-backoff timing, the
+  `errors.As`-via-Unwrap chain, the abort-on-Stack.Close path, and
+  the single-shot collapse. Host-side coverage on the new file:
+  100 % on every function except `DialTLSWithRetry` (83.3 %; the
+  uncovered statements are the TLS-handshake-specific branches the
+  unit tests can't reach without standing up a TLS server). Whole
+  `uefiboard/ministack` package: **88.4 %**.
+- OCI auth-probe retry: the spec contemplated wrapping
+  `oci.Registry.Authenticate()` separately; the preferred fix is
+  transport-level (fewer layers to thread through). Since
+  `Authenticate` ultimately calls `Stack.HTTPSGet` → `Stack.DialTLS`,
+  the retry inherited at the transport layer covers it without any
+  oci-package changes.
+
+Live amd64 re-test result (post-retry, fresh build of
+`BOOTX64-HTTPS.EFI` + `BOOTX64-OCI.EFI`): see the updated row in
+the consolidated smoke matrix above.
 
 #### M6.2 — SHIPPED summary (PR1 + PR2 + PR3, 2026-06-09)
 
@@ -5167,3 +5227,99 @@ Per milestone, revisit at the start of the M-N agent run.
   UninstallAllRNG), `kernelboot_arm64.go` (R-M8.8a doc block
   CLOSED). 13 RNG host tests + the whole uefiboard test suite
   green. No regression on any other arch's MODE C live test.
+
+- **2026-06-10** (M8.10 — **FIRST FULL END-TO-END KERNEL BOOT**,
+  Phase 2 / Path D): R-M8.9a **CLOSED**. After M8.9 closed the
+  pre-EBS abort, the EFI-stub trace reached a clean "Exiting boot
+  services and installing virtual address map..." then ZERO bytes
+  past EBS on PL011 — not a glyph, not an ANSI escape.
+
+  Phase 1 (KEEPRUN inspection): confirmed `qemu.log` truly ends at
+  the EBS line with no garbage byte or escape sequence.
+
+  Phase 2 (cmdline + chardev hypotheses): tried `console=ttyAMA0,115200n8`
+  (explicit 8-N-1), `-chardev stdio,mux=off,signal=off`,
+  `debug ignore_loglevel`, `earlyprintk=pl011,0x9000000`. All
+  produced the same ZERO-byte silence. Decoded embedded DTB
+  (`dtc -I dtb -O dts uefiboard/embed_dtb_arm64_virt.dtb`) and
+  verified clean `pl011@9000000` + `chosen/stdout-path =
+  "/pl011@9000000"` + `serial0` alias — DTB was correct all along.
+  Tried virtio-console pivot (`-device virtio-serial-pci` +
+  `-device virtconsole,chardev=hvc0_log,name=hvc0` +
+  `console=hvc0 console=ttyAMA0`); the hvc0 log also went silent
+  post-EBS, confirming the kernel never reached ANY console driver
+  init.
+
+  Phase 3 (QEMU `-d int,unimp,guest_errors`): captured the actual
+  cause — the CPU is stuck in a tight IRQ loop with every timer
+  tick vectored to **EL1 PC 0x13fd5f280** (EDK2's stale IVT in
+  DXE region). VBAR_EL1 never gets re-pointed to the kernel's
+  vectors, so the firmware IRQ handler keeps re-entering itself
+  forever. Conclusion: kernel hung very early in `head.S`
+  before MMU bring-up.
+
+  Phase 4 (direct `-kernel` bisection): downloaded the same
+  Talos kernel from the OCI ref and booted it via QEMU
+  `-kernel` directly (bypassing our entire EFI loader). Same
+  silence. Bisected on `-cpu`:
+  - `-cpu max`         → ZERO output on PL011.
+  - `-cpu cortex-a72`  → full kernel boot (517 lines of clean log).
+
+  ROOT CAUSE: the Talos kernel pinned by
+  `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc` is
+  Linux **5.10.29** (built 2021-05-14). `-cpu max` on QEMU 9.x
+  exposes CPU features (SVE2, FEAT_RNG, FEAT_HCX, …) this old
+  kernel doesn't know how to gate, and it crashes in very early
+  `head.S` before `VBAR_EL1` is set up. The stale firmware IRQ
+  vector then re-enters itself on every timer tick. None of the
+  cmdline tweaks made any difference because the kernel never
+  ran far enough to parse its `console=` argument.
+
+  FIX: pin `-cpu cortex-a72` in `internal/livekernelboot/run.sh`
+  (a real-world arm64 SoC CPU — Raspberry Pi 4, AWS Graviton 1 —
+  that 5.10.29 was actually tested against). Cmdline returned to
+  the M8.8 baseline (no `console=hvc0`, no `debug ignore_loglevel`).
+
+  Live arm64 trace now reaches:
+
+      EFI stub: Exiting boot services and installing virtual address map...
+      [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
+      [    0.000000] Linux version 5.10.29-talos (@buildkitsandbox) ...
+      [    0.000000] efi: EFI v2.70 by EDK II
+      ... (~780 kernel boot lines) ...
+      [    1.395400] Run /init as init process
+      cloud-boot/openweft Phase 2 Path D — /init userspace reached
+      Pseudo-filesystem mounts:
+        /proc: proc mounted
+        /sys: sysfs mounted
+        /dev: devtmpfs mounted
+        /tmp: tmpfs mounted
+      Kernel: 5.10.29-talos aarch64
+      Total RAM: 3904 MiB
+      CPUs: 1
+      Uptime: 1.34s
+      /init wall time: 37.004ms
+      Sleeping 5s before power-off…
+      Powering off via reboot(2)…
+      [    6.488031] reboot: Power down
+
+  This is the **first time** the cloud-boot/tamago-uefi pipeline
+  has driven a real Linux kernel from an OCI-streamed PE32+ image
+  all the way to userspace `/init` and a clean `reboot(2)`
+  power-down — Phase 2 / Path D end-to-end is operational on
+  arm64. Wall-clock: **17.1 s** for the full pipeline (4 s OCI
+  streaming + 7 s kernel boot + 5 s `/init` pause + power-off).
+
+  Acceptance gates (live runner) extended with:
+  - `grep -q "Run /init as init process" "$LOG"`
+  - `grep -q "cloud-boot/openweft Phase 2 Path D" "$LOG"`
+  - `grep -q "reboot: Power down" "$LOG"`
+
+  Files: `internal/livekernelboot/run.sh` (`-cpu max` →
+  `-cpu cortex-a72`, `-chardev stdio,mux=off,signal=off` instead
+  of bare `-serial stdio`, three new PASS-gate `grep`s, extended
+  highlight grep for the PASS-summary printout) + `kernelboot_arm64.go`
+  (M8.10 doc block, cmdline doc updated; cmdline unchanged from
+  M8.8 baseline). No regression on any other arch's MODE C live
+  test. Workdir on KEEPRUN now contains `qemu.log` with the full
+  ~933-line trace including userspace banner + power-down.
