@@ -4304,15 +4304,47 @@ Wire-up:
   (`+----+ | > entry |`) for universal terminal + firmware-font
   compatibility.
 
-Note (R-M9.1a, NEW): EDK2 stable202408 on QEMU arm64 virt does not
-surface the virtio-console subdevice as PCI device 0x1043 through
-`EFI_PCI_IO_PROTOCOL` even when `-device virtio-serial-pci -device
-virtconsole` is wired. The locator falls through and the ConOut sink
-is used. The ConOut path renders correctly (no ANSI interpretation —
-the firmware just writes the escape bytes as raw chars; the menu
-scrolls each redraw instead of redrawing in place). The virtio-console
-path is exercised end-to-end by the host-side renderer tests
-(`render_test.go` writes into a `bytes.Buffer`).
+R-M9.1a (DOCUMENTED 2026-06-10) — EDK2 stable202408 on QEMU arm64
+virt does not surface the virtio-console subdevice as PCI device
+0x1043 through `EFI_PCI_IO_PROTOCOL` even when
+`-device virtio-serial-pci -device virtconsole` is wired. Empirical
+evidence from the M9.1 live runner: `phase2-pcienum` enumerates 4
+EFI_PCI_IO handles (PCI bridge 1b36:0008, virtio-blk 1af4:1001,
+virtio-net 1af4:1041, and the virtio-blk-2 boot drive) — NO
+1af4:1043 handle. The locator falls through and the ConOut sink is
+used. **Root cause**: EDK2's `OvmfPkg/VirtioDxe` driver
+`BindingStart`s on the virtio-console PCI handle BY_DRIVER, which
+removes the bare `EFI_PCI_IO_PROTOCOL` instance from the OS-facing
+handle space (UEFI 2.10 §6.3 — a BY_DRIVER open hides the protocol
+from `LocateHandleBuffer`). The driver publishes its own child-device
+protocols (`EFI_SERIAL_IO_PROTOCOL`, `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`)
+on the child handle, which is the way the firmware exposes the device
+to ConOut.
+
+**Operational mode** (working-as-intended): the ConOut fallback IS
+the production path on EDK2 stable202408 arm64. ConOut renders
+correctly (no ANSI interpretation — the firmware just writes the
+escape bytes as raw chars; the menu scrolls each redraw instead of
+redrawing in place, which is the same UX as a serial-console
+firmware menu and remains fully usable). The virtio-console
+transport path (`OpenVirtioConsole` + `UEFITransport`) is exercised
+end-to-end by the host-side renderer tests (`render_test.go` writes
+into a `bytes.Buffer`) and the virtio_uefi_transport unit tests
+(mocked EFI_PCI_IO_PROTOCOL methods) so the M9.1 code is verified at
+the unit-test level even when no firmware exposes 0x1043 to OS
+enumeration.
+
+A future M9.x sub-task can validate the real-firmware virtio-console
+path on either (a) an amd64 q35 runner with a newer EDK2 build
+(stable202605+ reportedly relaxes the BY_DRIVER hide on the
+virtio-console child binding) or (b) a QEMU virtio-console-pci shim
+that publishes the bare PCI handle (no VirtioDxe binding). Neither
+is on the M9 critical path — the operational ConOut fallback ships
+unchanged.
+
+The behaviour is also documented in `uefiboard/doc.go` (package
+godoc) so future contributors don't waste time chasing a "missing
+device" bug.
 
 Tests:
 - `uefiboard/bootmenu/render_test.go` — first-frame ANSI prologue,
@@ -4337,15 +4369,53 @@ Menu loop in `runDHCPOCIMenuProbe`:
 Auto-boot: armed only when `cfg.Timeout > 0` AND `cfg.Default != ""`.
 Any keystroke disarms it (pushes deadline 24h ahead).
 
-R-M9.2a (NEW, DOCUMENTED) — `time.Sleep` blocks past its deadline in
-the single-goroutine M9.2 menu loop. Same root cause as the
+R-M9.2a (DOCUMENTED 2026-06-10) — `time.Sleep` blocks past its
+deadline in the single-goroutine M9.2 menu loop. **Root cause
+confirmed at the runtime level**: TamaGo declares `haveSysmon = false`
+on every supported arch (`tamago-pie/src/runtime/proc.go` line 6497:
+`const haveSysmon = (GOARCH != "wasm" && GOOS != "tamago")`). Without
+the `sysmon` background thread, the Go timer wheel has no off-G
+driver, and a `time.Sleep` call parks the only running G on a timer
+that nothing wakes. This is the same root-cause family as the
 ministack "drive RX inline" pattern (commits 91364cf, 8c86f35) and
-the R-M8.3b io.Pipe deadlock: TamaGo+UEFI has no async preemption,
-so when no concurrent goroutine drives the timer wheel, the parked
-goroutine never wakes. Workaround: `busyWait(d)` spin-checks
-`time.Now()` until the deadline. Costs ~10% of one core for the
-inter-tick wait — acceptable; the menu loop runs for at most
-`cfg.Timeout` seconds before dispatching.
+the R-M8.3b io.Pipe deadlock — TamaGo+UEFI is fundamentally a
+single-G runtime in any probe path that hasn't spun up a concurrent
+goroutine to drive the timer wheel.
+
+**Does amd64 post-R-amd64g help?** No. R-amd64g wires SIGURG-driven
+async preemption of a long-running cooperating G (so a `for{}` loop
+yields to the scheduler periodically), but does NOT enable `sysmon`
+— `haveSysmon` remains false. amd64 has the SAME failure mode as the
+other arches and uses the same `busyWait` workaround. No per-arch
+branching needed.
+
+**Workaround (CLOSED via documentation + tooling)**:
+
+- `busyWait(d)` spin-checks `time.Now()` until the deadline. Costs
+  ~10% of one core for the inter-tick wait — acceptable; the menu
+  loop runs for at most `cfg.Timeout` seconds before dispatching.
+- Documented at the package level in `uefiboard/doc.go` (godoc-visible
+  "Things that BLOCK or MISBEHAVE under TamaGo+UEFI" section listing
+  `time.Sleep`, `io.Pipe`, `chan + time.After`, `sync.WaitGroup.Wait`).
+- Documented at the call site: extended godoc on `busyWait` in
+  `phase2_dhcp_oci_menu.go` cites the runtime-side root cause and
+  cross-references `uefiboard/doc.go`.
+- Stale comment in `uefiboard/text_input_tamago.go` ("polls in 100 ms
+  ticks via time.Sleep") rewritten to match reality (`busyWait`).
+- Linter-style test `uefiboard/tamago_no_time_sleep_test.go` scans
+  every `phase2_*.go` probe at the repo root and fails if any
+  `time.Sleep` call regresses in. Currently scans 20 probe files,
+  zero hits. Runs as part of `go test ./uefiboard/...`.
+
+**Why not wire sysmon on TamaGo amd64?** Out of scope for M9:
+TamaGo's `proc.go` checks `GOOS != "tamago"` unconditionally; lifting
+that gate requires a thread implementation for the
+`runtime/lock_futex` / `notewakeup` path on bare-metal UEFI (no
+`futex`, no OS scheduler). The same hold applies to enabling
+`netpoll`. A future M10+ sprint could investigate a one-shot timer
+thread driven by the UEFI Generic Timer (`CNTVCT_EL0` on arm64,
+`TSC_DEADLINE` on amd64) but the existing busyWait shape is correct
+for the M9 menu's 10 Hz cadence.
 
 Dispatch: `bootEntry(entry, s, dns)` mirrors `runKernelBootLinuxKernel`
 from `phase2_oci_kernel_boot.go` — `streamExtractVmlinuzMenu`
