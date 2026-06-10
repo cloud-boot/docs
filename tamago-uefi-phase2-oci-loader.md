@@ -226,7 +226,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | Arch     | Mode  | EFI-stub OCI ref                                                                      | Live test                                                                                                     |
 |----------|-------|---------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | arm64    | C     | `ttl.sh/cloudboot-vmlinuz-arm64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian 13 `linux-signed-arm64` `linux-image-6.12.90+deb13.1-arm64`, see §M8.13) | **PASS — userspace reached (M8.13, 2026-06-10).** Linux 6.12.90+deb13.1-arm64 boots end-to-end via `-cpu max`: EFI-stub trace + DTB-from-config-table + initrd-load + `[ 1.176] Run /init as init process` + `cloud-boot/openweft Phase 2 Path D — /init userspace reached` + `reboot: Power down`. Wall: 17.1s. `-cpu cortex-a72` pin from M8.10 is OBSOLETE (Debian 6.12 gates modern CPU features). PublishDTB + UninstallAllRNG still required (EDK2 arm64 firmware-side, unchanged from M8.6/M8.9). |
-| amd64    | C (95%)  | `ttl.sh/cloudboot-vmlinuz-amd64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian 13 `linux-signed-amd64` `linux-image-6.12.90+deb13.1-amd64`, see §M8.13) | **NEAR-MISS — kernel boots, initrd corrupted (M8.14, 2026-06-10).** Live amd64 reaches `Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS edk2-20260508-2.fc45` running Linux 6.12.90+deb13.1-amd64 — full pipeline R-amd64a..i + M8.13 works end-to-end. NEAR-MISS at initramfs unpack: `Trying to unpack rootfs image as initramfs... Initramfs unpacking failed: invalid magic at start of compressed archive` + `Freeing initrd memory: 764K` (size correct, gzip magic 0x1f 0x8b corrupted at offset 0). R-amd64j queued: LoadFile2 byte-transfer corruption specific to amd64. **Phase 2 experiment (2026-06-10)**: stamping known gzip magic at `bufP[0..7]` AFTER byte loop — kernel still reports "invalid magic". **Phase 3 experiment (2026-06-10, via COM1 0x3f8 direct port I/O bypassing firmware ConOut)**: asm-side and Go-side bufP extractors AGREE on the value (trampoline is internally consistent), BUT the value varies dramatically run-to-run (0x04C00000, 0x05 garbage, 0x10AC00000 above-4GiB) AND in Run 1 the write DID land at the extracted address (`bufP[0]_post=0x1F` confirmed) yet the kernel STILL reported invalid magic. **Conclusion: the bufP the firmware passes our callback is NOT the buffer the kernel reads from.** Either (a) EDK2 OVMF amd64 LoadFile2 implementation has an unexpected double-buffer indirection (passes scratch pointer to callback, reads from a different buffer post-EBS), or (b) the firmware-allocated buffer is relocated/reclaimed between our callback and the kernel's post-EBS read. `bodyKeepAlive` defensive fix shipped (Phase 1). Trampoline offset 168(SP) confirmed correct vs MS x64 shadow rules (Phase 3 multi-candidate dump ruled out 176(SP) and R8). **R-amd64j Phase 4 next**: pivot away from LoadFile2 — use `gBS->InstallConfigurationTable(LINUX_EFI_INITRD_MEDIA_GUID, ...)` to publish initrd directly via configuration table at a Go-owned stable address; Linux EFI stub has a fallback path. New serial-debug helpers (`uefiboard/serial_debug{.go,_amd64.s,_<arch>.s,_host.go}`) shipped for future low-level investigations. |
+| amd64    | C     | `ttl.sh/cloudboot-vmlinuz-amd64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian 13 `linux-signed-amd64` `linux-image-6.12.90+deb13.1-amd64`, see §M8.13) | **PASS — userspace reached (M8.14, 2026-06-10; R-amd64j CLOSED).** Linux 6.12.90+deb13.1-amd64 boots end-to-end: `EFI stub: Loaded initrd from command line option` + `[ 0.000000] Linux version 6.12.90+deb13.1-amd64 (...)` + `[ 1.875717] Run /init as init process` + `cloud-boot/openweft Phase 2 Path D — /init userspace reached` + `[ 6.989892] reboot: Power down`. Wall: 16.1s. **R-amd64j workaround**: amd64 uses `kernelBootInitrdMode = "espfile"` instead of the LoadFile2/LINUX_EFI_INITRD_MEDIA_GUID path proven on the other 3 arches. The initrd is staged on the ESP at `\initrd.gz` by `internal/livekernelboot/run.sh` and loaded by the kernel EFI-stub via cmdline `initrd=\initrd.gz` (`drivers/firmware/efi/libstub/file.c` `handle_cmdline_files` → `efi_open_volume`). The new `uefiboard.InheritParentDeviceHandle` helper copies our parent `LoadedImage.DeviceHandle` (the ESP volume) into the kernel's `LoadedImage` between LoadImage and StartImage so `efi_open_volume(image)` resolves to the ESP rather than the NULL DeviceHandle EDK2 leaves on a `LoadImage(SourceBuffer != NULL, FilePath == NULL)` call. PublishInitrd is bypassed on amd64. arm64/riscv64/loong64 keep `kernelBootInitrdMode = "protocol"` — their EDK2 firmwares publish LoadFile2 cleanly. |
 | riscv64  | C     | `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.11, 2026-06-10).** Linux 6.12.90 boots end-to-end: EFI-stub + initrd-load + `[ 0.903] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 18.1s. NO per-arch QEMU/cmdline tweaks needed (recent kernel auto-handles `-cpu max`; SBI earlycon; empty-DTB OK on riscv64); only change vs. M8.4 dormant was per-arch riscv64 ELF /init via `initramfs_riscv64.cpio.gz`. |
 | loong64  | C     | `ttl.sh/cloudboot-vmlinuz-loong64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.12, 2026-06-10).** Linux 7.0.12 boots end-to-end: EFI-stub jumps straight in (loong64 EFI-stub is quieter — no `Booting Linux Kernel...` line), `[ 0.752] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 17.1s. NO per-arch QEMU/cmdline tweaks needed (recent Debian 7.0.12 + ACPI auto-discovery + ttyS0 16550); only change vs. M8.4 dormant was per-arch loong64 ELF /init via `initramfs_loong64.cpio.gz`. |
 
@@ -2250,6 +2250,112 @@ per-stage budgets from a single `now := time.Now()` snapshot — but
 the simpler "pass timeout straight through" pattern is what
 `HTTPGet` already does and is what this fix aligns the TLS path
 with.
+
+#### R-amd64j — EDK2 OVMF amd64 LoadFile2 buffer-swap quirk (CLOSED 2026-06-10, M8.14)
+
+The final amd64 blocker that kept the §M8.3 matrix at "C (95%) NEAR-MISS"
+through M8.13. Phase 3 (cloud-boot/docs@14484d3) proved that EDK2 OVMF
+amd64's LoadFile2 protocol implementation has a quirk where the
+`Buffer` pointer it passes to our `LoadFile` callback is NOT the
+buffer the kernel later reads from when consuming the initrd —
+even though the asm-side and Go-side bufP extractions AGREE on the
+value the firmware handed us, even though a known gzip magic stamped
+at `bufP[0]` reads back correctly via the same address, the kernel
+still reports `Initramfs unpacking failed: invalid magic at start of
+compressed archive`. The 3/4 other arches (arm64, riscv64, loong64)
+work flawlessly with the same LoadFile2 mechanism. With three
+independent experiments having ruled out caller-side bugs (Phase 1
+bodyKeepAlive, Phase 2 magic-stamp, Phase 3 COM1-direct trace +
+asm/Go agreement), we pivot away from LoadFile2 entirely on amd64.
+
+**Workaround shipped (M8.14, 2026-06-10).** amd64 uses the kernel
+EFI-stub's secondary cmdline-driven initrd loader
+(`drivers/firmware/efi/libstub/efi-stub-helper.c::efi_load_initrd_cmdline`
+→ `drivers/firmware/efi/libstub/file.c::handle_cmdline_files`) instead
+of the `LINUX_EFI_INITRD_MEDIA_GUID` + LoadFile2 path. The pieces:
+
+1. **`internal/livekernelboot/run.sh` amd64 case** — stages
+   `internal/embed_initramfs/initramfs_amd64.cpio.gz` (779,807 bytes
+   ungzipped to ~2.7 MiB) as `\initrd.gz` on the ESP via `mcopy -i
+   "$ESP" ... "::/initrd.gz"`. The ESP is the same 16 MiB FAT12 image
+   that already carries `\EFI\BOOT\BOOTX64.EFI`.
+2. **`kernelboot_amd64.go` cmdline** — adds `initrd=\initrd.gz`. The
+   Linux EFI-stub parses this token via `find_file_option` and resolves
+   the file through `efi_open_device_path` (which falls back to
+   `efi_open_volume(image)` on `EFI_NOT_FOUND` / `EFI_UNSUPPORTED`).
+3. **`kernelboot_amd64.go` mode flag** — `kernelBootInitrdMode =
+   "espfile"` (other three arches: `"protocol"`).
+4. **`uefiboard.InheritParentDeviceHandle`** (new helper) — between
+   LoadImage and StartImage, copies our parent
+   `LoadedImage.DeviceHandle` + `LoadedImage.FilePath` into the
+   kernel's `LoadedImage`. Without this, `efi_open_volume(image)`
+   reads `image->device_handle == NULL` because EDK2's
+   `MdeModulePkg/Core/Dxe/Image/Image.c::CoreLoadImage` leaves
+   DeviceHandle NULL when called with `SourceBuffer != NULL` AND
+   `FilePath == NULL` (verified against
+   `tianocore/edk2@edk2-stable202408`). With the inheritance in
+   place, the kernel sees the ESP volume handle we booted from and
+   `efi_open_volume` → `handle_protocol(EFI_FILE_SYSTEM)` succeeds
+   first try.
+5. **`phase2_oci_kernel_boot.go` switch** — on `kernelBootInitrdMode
+   == "espfile"`: skip `PublishInitrd`, log the new
+   `initrd source = ESP file (...)` line; on `"protocol"`: keep the
+   existing PublishInitrd-with-OCI-or-embedded path. arm64 / riscv64
+   / loong64 are unaffected.
+
+**Live trace (2026-06-10, first successful amd64 run):**
+
+```
+phase2-oci-kernel-boot: InheritParentDeviceHandle OK (espfile mode; kernel inherits parent ESP DeviceHandle)
+phase2-oci-kernel-boot: initrd source = ESP file (R-amd64j espfile mode; kernel will read via cmdline initrd=<path>)
+phase2-oci-kernel-boot: StartImage entering EFI-stub kernel
+EFI stub: Loaded initrd from command line option
+[    0.000000] Linux version 6.12.90+deb13.1-amd64 (debian-kernel@...) ... #1 SMP PREEMPT_DYNAMIC Debian 6.12.90-2 (2026-05-27)
+[    0.000000] efi: EFI v2.7 by EDK II
+[    1.875717] Run /init as init process
+cloud-boot/openweft Phase 2 Path D — /init userspace reached
+[    1.956360] cloud-boot/openweft Phase 2 Path D — /init userspace reached
+Kernel cmdline: console=ttyS0,115200 earlyprintk=ttyS0,115200 keep_bootcon printk.time=y root=/dev/ram0 rdinit=/init initrd=\initrd.gz loglevel=8 panic=10
+Kernel: 6.12.90+deb13.1-amd64 x86_64
+Total RAM: 3914 MiB
+[    6.989892] reboot: Power down
+```
+
+Wall: 16.1s end-to-end. The §M8.3 matrix amd64 row flips from "C
+(95%) NEAR-MISS" to "C — PASS userspace reached". All four arches
+green.
+
+**Why not pursue the LoadFile2 root cause further.** The Phase 3
+result narrowed the bug to EDK2 OVMF amd64 firmware-side: the
+`Buffer` arg in our callback signature and the buffer the kernel
+reads from are two different memory regions. Without an EDK2-side
+patch (and ideally a public OVMF release including it) there is no
+amount of caller-side polish that fixes this. The
+`InheritParentDeviceHandle` + ESP-file workaround is a clean,
+robust, single-file-per-arch alternative that uses an officially
+supported Linux EFI-stub path (`initrd=<path>` is documented in
+`Documentation/admin-guide/efi-stub.rst` since 5.7) and matches how
+distro bootloaders like systemd-boot / GRUB already publish initrds
+on x86.
+
+**Files added / modified:**
+
+- `tamago-uefi/uefiboard/inherit_device_handle.go` (new, tamago)
+- `tamago-uefi/uefiboard/inherit_device_handle_host.go` (new, host stub)
+- `tamago-uefi/kernelboot_amd64.go` (cmdline + `kernelBootInitrdMode = "espfile"`)
+- `tamago-uefi/kernelboot_arm64.go` / `_riscv64.go` / `_loong64.go`
+  (`kernelBootInitrdMode = "protocol"` — explicit)
+- `tamago-uefi/phase2_oci_kernel_boot.go` (mode switch + InheritParentDeviceHandle call)
+- `tamago-uefi/internal/livekernelboot/run.sh` (amd64 ESP-staging + acceptance gates)
+
+**Forward note: arm64 / riscv64 / loong64.** They keep
+`kernelBootInitrdMode = "protocol"` because their EDK2 firmwares
+publish LoadFile2 cleanly and the existing PublishInitrd code is
+already proven (M8.10 / M8.11 / M8.12). If a future regression
+ever exhibits the same buffer-swap quirk on those arches, flipping
+the const to `"espfile"` is a one-line change and the ESP-staging
+gate in `run.sh` already supports the staging step (just remove the
+`if [[ "$ARCH" == "amd64" ]]` guard).
 
 #### M6.2 — SHIPPED summary (PR1 + PR2 + PR3, 2026-06-09)
 
