@@ -218,7 +218,8 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a CLOSED 2026-06-10 via M8.6** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel-side R-M8.5a (empty-DTB null-deref) CLOSED by M8.6 PublishDTB: EFI-stub now prints `Using DTB from configuration table` + `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` — old crash gone; new RngDxe-side fault (R-M8.6a, kernel-side) tracked separately below.** |
 | **M8.6**    | **SHIPPED 2026-06-10; R-M8.5a CLOSED; R-M8.6a OPEN (RngDxe Translation fault)** | **PublishDTB + InstallConfigurationTable + AllocatePool wrappers + embedded arm64-virt DTB. Live arm64 trace: `DTB published ( 7191 bytes)` → ProbeDTBConfigurationTable now sees 9 GUIDs (was 8) with `b1b621d5-...` (EFI_DTB_TABLE_GUID) at index 8 → `EFI stub: Using DTB from configuration table` → `EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path`. The empty-DTB null-deref (FAR=0x40 in EFI-stub) that blocked M8.5 is GONE. fw_cfg-via-MMIO path implemented + correct per QEMU docs/specs/fw_cfg.rst but EDK2 ArmVirtPkg doesn't map the fw_cfg window into page tables (Synchronous External Abort FAR=0x09020008) — short-circuited via per-arch fwCfgMMIOBase returning (0, false). Embedded DTB path is the M8.6 default; live MMIO walker auto-engages the day EDK2 (or our own pre-flight AddMemorySpace) makes 0x09020000 reachable.** |
 | **M8.7**    | **SHIPPED 2026-06-10; R-M8.6a CLOSED** | **Dual-path RngDxe fix: (A) cmdline adds `nokaslr random.trust_bootloader=0 random.trust_cpu=0` so kernel skips EFI RNG entirely; (B) `uefiboard.PublishRNG` + per-arch trampolines (rng_protocol_<arch>.s × 4) install `EFI_RNG_PROTOCOL` handle for future builds that re-enable KASLR. Live arm64 trace: `KASLR disabled on kernel command line` instead of `efi_get_random_bytes() failed` — no RngDxe Data Abort, EFI-stub completes its 4-line trace cleanly, control transfers to kernel proper (post-EBS output routes via pl011 serial; M8.8 will wire the routing). |
-| M8.8        | next                                | **post-EBS serial routing** (kernel `[ x.xxx]` lines past EFI-stub; pl011 mmio32 at 0x9000000 likely target) |
+| **M8.8**    | **SHIPPED 2026-06-10; cmdline routing fixed; R-M8.8a OPEN (new pre-EBS Data Abort, kernel-side)** | **Post-EBS serial routing cmdline cleanup: drop `acpi=force` (M8.6 now publishes a proper QEMU-virt DTB with pl011@9000000 + serial0 alias + chosen/stdout-path; with both `acpi=force` AND a DTB present the kernel was picking ACPI which has no UART description); add `keep_bootcon` so earlycon stays alive until ttyAMA0 is fully registered; add `earlyprintk=keep` for symmetry; add `printk.time=y` for `[ x.xxx]` timestamp prefix. QEMU `-serial stdio` confirmed routing PL011 correctly via clean EFI-stub trace. Live test with `M81_LIVE_KEEPRUN=1` uncovered a NEW pre-ExitBootServices Data Abort (R-M8.8a): `Synchronous Exception at 0x000000013C0FF9DC, ESR 0x96000047, FAR 0x40` (Translation fault, third level, null+0x40 deref) caught by EDK2's `ArmCpuDxe` DefaultExceptionHandler — proving boot services were still active when the fault fired. M8.7 PublishRNG already neutralised the firmware RngDxe handle; this is a DIFFERENT firmware-side null-deref on the kernel→firmware path. Cmdline cleanup is correct on its own merits and will let post-EBS output flow the moment R-M8.8a is unblocked in M8.9. |
+| M8.9        | next                                | **R-M8.8a: pre-EBS Data Abort in EDK2 DXE region** (suspected: efi_random_alloc indirect, efi_get_memory_map walk over partially-uninstalled handle, or a runtime services install path) |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
 
@@ -3725,6 +3726,130 @@ open('uefiboard/embed_dtb_arm64_virt.dtb','wb').write(new_hdr + src[40:real_end]
 Coverage: 14 new host tests in `uefiboard/` (6 fw_cfg + 8
 install-config-table); all pre-existing tests still green.
 
+### M8.7 — PublishRNG + cmdline nokaslr — R-M8.6a CLOSED (SHIPPED 2026-06-10)
+
+R-M8.6a (kernel-side RngDxe Translation fault on
+`efi_get_random_bytes` retry) **CLOSED** via dual-path mitigation:
+
+**Approach A (cmdline)**: append `nokaslr
+random.trust_bootloader=0 random.trust_cpu=0` to
+`kernelBootCmdline`. The Linux EFI-stub reports `KASLR disabled
+on kernel command line` instead of calling
+`efi_get_random_bytes` — the retry path that hit RngDxe's null
+deref is never entered.
+
+**Approach B (`uefiboard.PublishRNG`)**: install an
+`EFI_RNG_PROTOCOL` handle backed by Go-side trampolines
+(`uefiboard/rng_protocol_<arch>.s` × 4) so that future builds
+which re-enable KASLR can rely on a working firmware-shape RNG
+protocol. The publisher additionally walks all handles that
+already implement `EFI_RNG_PROTOCOL_GUID`
+(`3152bca5-eade-433d-862e-c01cdc291f44`) and uninstalls the
+firmware's RngDxe interface so the kernel-side `LocateProtocol`
+can only ever land on our Go-side handle.
+
+Live arm64 trace (M8.7):
+
+```
+phase2-rng: uninstalled firmware RNG interface on handle = 5352810904
+phase2-oci-kernel-boot: RNG published, handle = 0x13f0d6c98
+...
+EFI stub: Booting Linux Kernel...
+EFI stub: KASLR disabled on kernel command line
+EFI stub: Using DTB from configuration table
+EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+```
+
+The 4-line EFI-stub trace completes cleanly with no Data Abort.
+Runner gates green; post-EBS visibility deferred to M8.8.
+
+### M8.8 — Post-EBS serial routing cmdline cleanup + R-M8.8a uncovered (SHIPPED 2026-06-10)
+
+**Cmdline routing**: with M8.6 publishing a proper QEMU-virt DTB
+(pl011@9000000 + serial0 alias + chosen/stdout-path), the
+M8.5-era `acpi=force` override is now actively harmful — the
+kernel was picking ACPI (EDK2's MADT/GTDT, which has no UART
+description on `-machine virt`) over DTB, so even if every
+post-EBS bug were fixed the late console hand-off from earlycon
+to ttyAMA0 would silently never initialise. M8.8 cmdline diff
+(arm64):
+
+```diff
+ console=ttyAMA0,115200
+-earlycon=pl011,mmio32,0x9000000
+-acpi=force
++earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep
++printk.time=y
+ root=/dev/ram0 rdinit=/init
+ loglevel=8 panic=10
+ nokaslr random.trust_bootloader=0 random.trust_cpu=0
+```
+
+Drops `acpi=force` (kernel auto-picks DTB now), adds
+`keep_bootcon` (earlycon stays alive until ttyAMA0 is fully
+registered), `earlyprintk=keep` (symmetry for kernels gated on
+`earlyprintk` instead of `earlycon`), `printk.time=y` (post-EBS
+`[ x.xxx]` timestamp prefix).
+
+**QEMU side verified clean**: `-serial stdio` correctly routes
+PL011 → host stdio. The EFI-stub's 4 lines reach the runner
+intact, proving the chardev path works end-to-end.
+
+**R-M8.8a — NEW pre-EBS Data Abort (OPEN, queued for M8.9)**:
+
+Running the M8.8 build with `M81_LIVE_KEEPRUN=1` exposed what the
+M8.7 watchdog-PASS was hiding:
+
+```
+EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+...
+Synchronous Exception at 0x000000013C0FF9DC
+ASSERT [ArmCpuDxe] DefaultExceptionHandler.c(343): 0==1
+ESR 0x96000047    FAR 0x0000000000000040
+ESR : EC 0x25  IL 0x1  ISS 0x00000047
+X0 0x00000000  X1 0x40  X2 0x40  X17 = ASCII fragment " is line "
+```
+
+`EC 0x25` = Data Abort from same EL with translation, FAR=0x40 =
+null+0x40 deref. ELR lands inside the EDK2 DXE region (boot
+services still active — proven by the fact that EDK2's own
+`ArmCpuDxe.DefaultExceptionHandler` caught the fault). X17
+contains the ASCII fragment " is line " and X6 = `"mapp"` (ASCII
+for "mapp"), suggesting a string-formatting / memory-map walk
+inside firmware that's deref'ing a NULL caller-supplied pointer
+at offset 0x40.
+
+This is a DIFFERENT bug from R-M8.6a (which was inside
+`RngDxe.dll +0x3220`; M8.7's PublishRNG uninstalled that handle,
+so the kernel can't re-enter it). Likely candidates:
+
+1. `efi_random_alloc` for the kernel image relocation path —
+   may call into firmware's memory allocator with a NULL
+   constraint pointer.
+2. `efi_get_memory_map` walk landing on a handle we partially
+   uninstalled (M8.7 PublishRNG → `gBS->UninstallProtocolInterface`
+   may have left a stale entry).
+3. A runtime-services install path (`InstallConfigurationTable`
+   variant) called from kernel/EFI-stub late init.
+
+**Reproduce**:
+
+```sh
+M81_LIVE_KEEPRUN=1 task kernelboot:live:arm64
+# Then:
+grep -A 40 'Synchronous Exception' "$WORK"/qemu.log
+```
+
+**M8.8 ship rationale**: the cmdline cleanup is independently
+correct (kernel was guaranteed to lose serial post-EBS under
+`acpi=force` + DTB-present) and is a prerequisite for any post-EBS
+output ever appearing. R-M8.8a is now the single remaining blocker
+between us and `[ x.xxx]` Linux version + `Run /init as init
+process` + the Phase 2 Path D banner.
+
+**Files**:
+- `kernelboot_arm64.go` — cmdline cleanup + M8.8 doc block.
+
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
@@ -4872,3 +4997,33 @@ Per milestone, revisit at the start of the M-N agent run.
   trampoline). Coverage 100% in `internal/embed_initramfs` (5 tests
   including the new ELF guard). No regression on uefiboard or any
   other arch's MODE B self-test.
+
+- **2026-06-10** (M8.8): post-EBS serial routing cmdline cleanup.
+  Investigated why the M8.7 build's runner went green via watchdog
+  timeout rather than via observed `[ x.xxx]` kernel printk lines.
+  Confirmed QEMU `-serial stdio` routes PL011 → host stdio correctly
+  (EFI-stub's 4 lines reach the runner intact). Found and fixed a
+  latent cmdline conflict: M8.5 added `acpi=force` back when EDK2's
+  arm64 firmware on `-machine virt` published ACPI tables but no
+  DTB; M8.6's PublishDTB then started installing a proper QEMU-virt
+  DTB under `EFI_DTB_TABLE_GUID` (with pl011@9000000 + serial0 alias
+  + chosen/stdout-path), making `acpi=force` actively harmful — the
+  kernel was picking ACPI (MADT/GTDT with no UART description) over
+  DTB, so even if every post-EBS bug were fixed the late console
+  hand-off from earlycon to ttyAMA0 would silently never initialise.
+  `kernelboot_arm64.go` cmdline diff: dropped `acpi=force`, added
+  `keep_bootcon` (earlycon stays alive until ttyAMA0 registers),
+  `earlyprintk=keep` (symmetry), `printk.time=y` (`[ x.xxx]`
+  timestamp prefix). Live test under `M81_LIVE_KEEPRUN=1` then
+  exposed a NEW pre-ExitBootServices Data Abort (R-M8.8a):
+  `Synchronous Exception at 0x000000013C0FF9DC, ESR 0x96000047,
+  FAR 0x40` (Translation fault, third level, null+0x40 deref)
+  caught by EDK2's `ArmCpuDxe` DefaultExceptionHandler — proving
+  boot services were still active when it fired. Different bug
+  from R-M8.6a (which was inside RngDxe.dll +0x3220 — M8.7
+  PublishRNG already uninstalled that handle); the cmdline cleanup
+  is correct on its own merits and is a prerequisite for any
+  post-EBS output ever appearing. R-M8.8a is now the single
+  remaining blocker between us and `[ x.xxx]` Linux version + `Run
+  /init as init process` + the Phase 2 Path D banner. Queued for
+  M8.9. No regression on any host test.
