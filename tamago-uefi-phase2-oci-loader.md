@@ -3850,6 +3850,117 @@ process` + the Phase 2 Path D banner.
 **Files**:
 - `kernelboot_arm64.go` — cmdline cleanup + M8.8 doc block.
 
+### M8.9 — R-M8.8a CLOSED: UninstallAllRNG replaces PublishRNG (SHIPPED 2026-06-10)
+
+R-M8.8a (pre-EBS Data Abort downstream of EFI_RNG_PROTOCOL.GetRNG)
+**CLOSED**. The EFI-stub now reaches "Exiting boot services and
+installing virtual address map..." — the line immediately
+preceding `ExitBootServices()` — with zero firmware exceptions.
+
+**Diagnosis (Phase 4 — disable-PublishRNG probe)**:
+
+Two live runs differ by ONE constant flip on the same kernel image:
+
+| PublishRNG | Outcome | Abort location |
+|------------|---------|----------------|
+| **enabled** (M8.7 baseline) | aborts post-GetRNG | `0x13C1024AC` (kernel `efi_random_get_seed()` post-flow) |
+| **disabled** + RngDxe still present | aborts inside RngDxe | `0x13FDB9220 = RngDxe.dll +0x3220` (R-M8.6a reverts) |
+| **UninstallAllRNG** (M8.9 fix) | NO abort, reaches "Exiting boot services" | n/a — `efi_random_get_seed()` early-exits |
+
+The kernel's `drivers/firmware/efi/libstub/random.c` defines
+`efi_random_get_seed()`:
+
+```c
+status = efi_bs_call(locate_protocol, &rng_proto, NULL, (void **)&rng);
+if (status != EFI_SUCCESS)
+    seed_size = 0;
+get_efi_var(L"RandomSeed", &rng_table_guid, NULL, &nv_seed_size, NULL);
+if (!seed_size && !nv_seed_size)
+    return status;        // ← M8.9 early-exit path
+```
+
+With both branches forcing `seed_size = 0` (no RNG protocol) AND
+`nv_seed_size = 0` (no `RandomSeed` UEFI variable), the function
+returns early without any further firmware calls — no
+`allocate_pool`, no `get_rng`, no
+`install_configuration_table`. The downstream
+NULL+0x40 deref in EDK2's debug-format engine never fires.
+
+Register evidence (PublishRNG enabled, pre-fix):
+
+```
+X0 = 0x00000000   X1 = 0x40   X2 = 0x40
+X6 = 0x70616D6D = "mapp"          (start of "mapping")
+X17= 0x20656E696C207369 = " is line "
+X21= our LoadImage handle
+```
+
+The `"mapping"` + `" is line "` fragments are debug-print format
+strings from EDK2's memory-map walker that gets driven from
+`install_configuration_table` / `install_memreserve_table` —
+i.e. the firmware notification chain that fires AFTER our GetRNG
+returned successfully. The simplest fix is "don't get to that
+chain at all", which is what `UninstallAllRNG` achieves.
+
+**Code change**:
+
+```diff
+-  rngHandle, rngErr := uefiboard.PublishRNG()
+-  if rngErr != nil { … } else { println("RNG published…") }
++  yanked := uefiboard.UninstallAllRNG()
++  println("UninstallAllRNG: yanked", yanked, "firmware RNG interface(s); LocateProtocol(RNG) will now return NOT_FOUND")
+```
+
+`UninstallAllRNG()` enumerates every handle publishing
+`EFI_RNG_PROTOCOL` via `LocateHandleBuffer`, fetches each
+interface pointer via `HandleProtocol`, and yanks the protocol
+interface from each handle via
+`gBS->UninstallProtocolInterface`. It installs no replacement.
+
+**Defence in depth retained**: `kernelboot_arm64.go` still ships
+`nokaslr random.trust_bootloader=0 random.trust_cpu=0` so even
+if a future kernel version added a code path that bypassed the
+`efi_random_get_seed()` early-exit, the entropy pool wouldn't be
+seeded from an unverified source.
+
+**Live arm64 trace (M8.9)**:
+
+```
+phase2-rng: uninstalled firmware RNG interface on handle = 5352810904
+phase2-oci-kernel-boot: UninstallAllRNG: yanked 1 firmware RNG interface(s); LocateProtocol(RNG) will now return NOT_FOUND
+phase2-oci-kernel-boot: LoadImage OK, handle = 0x13f0d6c98
+phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len = 199
+phase2-oci-kernel-boot: PublishInitrd OK, initrd handle = 0x13e8bdd18
+phase2-oci-kernel-boot: StartImage entering EFI-stub kernel
+phase2-oci-kernel-boot: ---- kernel-side output below this line ----
+EFI stub: Booting Linux Kernel...
+EFI stub: KASLR disabled on kernel command line
+EFI stub: Using DTB from configuration table
+EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+EFI stub: Exiting boot services and installing virtual address map...
+```
+
+Zero `Synchronous Exception` lines in the qemu log. EFI-stub
+trace gained one new line (`Exiting boot services…`) — the LAST
+line printed before the kernel jumps into post-EBS code paths.
+
+**Post-EBS silence — NEW issue (R-M8.9a, OPEN)**: after
+"Exiting boot services…" the QEMU log goes silent for the full
+watchdog window (120 s). The runner gates green
+(`(EFI stub: Booting Linux Kernel|Linux version)` is matched on
+the first alternation), but no kernel `[ x.xxx]` lines appear.
+This is the post-EBS console hand-off — earlycon-to-ttyAMA0
+transition isn't producing output on the QEMU stdio. Separate
+investigation from R-M8.8a; tracked as R-M8.9a in §5. The Path
+D `/init` userspace banner is therefore NOT yet visible in the
+runner log, but the **pre-EBS abort chain is fully unblocked**.
+
+**Files**:
+- `uefiboard/rng_protocol_tamago.go` — new `UninstallAllRNG()` helper.
+- `phase2_oci_kernel_boot.go` — swap `PublishRNG()` → `UninstallAllRNG()`.
+- `kernelboot_arm64.go` — refresh R-M8.8a doc block (CLOSED).
+- `cloud-boot/docs/tamago-uefi-phase2-oci-loader.md` — this entry.
+
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
@@ -5027,3 +5138,32 @@ Per milestone, revisit at the start of the M-N agent run.
   remaining blocker between us and `[ x.xxx]` Linux version + `Run
   /init as init process` + the Phase 2 Path D banner. Queued for
   M8.9. No regression on any host test.
+
+- **2026-06-10** (M8.9): R-M8.8a **CLOSED** via
+  `uefiboard.UninstallAllRNG()` replacing `uefiboard.PublishRNG()`
+  in the MODE C path. Phase 4 disable-PublishRNG probe demonstrated
+  R-M8.8a only fires when an `EFI_RNG_PROTOCOL` is reachable: with
+  PublishRNG ENABLED the abort fires post-GetRNG inside the
+  EFI-stub's `efi_random_get_seed()` `install_configuration_table`
+  + memory-map walk path (X0=0, X1=0x40, X2=0x40, X6="mapp",
+  X17=" is line " — debug-format strings from EDK2's memory-map
+  walker); with PublishRNG DISABLED but RngDxe still present the
+  abort reverts to R-M8.6a inside `RngDxe.dll +0x3220`. The fix
+  yanks the firmware's `EFI_RNG_PROTOCOL` interface from every
+  handle without installing a replacement, so
+  `gBS->LocateProtocol(RNG, NULL, &iface)` returns
+  `EFI_NOT_FOUND`, `efi_random_get_seed()` takes its early-exit
+  path (`seed_size = 0` AND no `RandomSeed` UEFI variable), and
+  the EFI-stub continues into "Exiting boot services and
+  installing virtual address map..." — the line immediately
+  preceding `ExitBootServices()`. Live arm64 trace gains that one
+  new line + ZERO `Synchronous Exception` entries in the qemu log
+  (verified with `M81_LIVE_KEEPRUN=1`). Post-EBS console silence
+  remains as the next blocker (R-M8.9a, queued for M8.10) — the
+  kernel is running but its earlycon-to-ttyAMA0 hand-off doesn't
+  produce output on the QEMU stdio. Files:
+  `uefiboard/rng_protocol_tamago.go` (+71 lines, new
+  `UninstallAllRNG`), `phase2_oci_kernel_boot.go` (PublishRNG →
+  UninstallAllRNG), `kernelboot_arm64.go` (R-M8.8a doc block
+  CLOSED). 13 RNG host tests + the whole uefiboard test suite
+  green. No regression on any other arch's MODE C live test.
