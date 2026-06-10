@@ -101,6 +101,7 @@ nav:
       - Components: architecture/components.md
       - Hypervisor matrix: architecture/hypervisors.md
       - TamaGo UEFI (Path D): architecture/tamago-uefi.md
+      - Phase 3 — OS-agnostic OCI boot: architecture/phase3-multi-os-oci-boot.md
   - Filesystem drivers:
       - filesystems/index.md
       - ext4: filesystems/ext4.md
