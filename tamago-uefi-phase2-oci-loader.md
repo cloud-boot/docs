@@ -214,7 +214,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
-| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace)** |
+| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 landscape ENUMERATED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar; both arches stay dormant.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
 
@@ -222,8 +222,128 @@ time, from PCI device discovery up to Linux kernel handoff.
 |----------|-------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | PASS — EFI-stub prints "Booting Linux Kernel..." + KASLR + DTB + initrd-load attempts (see M8.3 dump below). |
 | amd64    | dormant (B) | siderolabs/kernel ships amd64 too; wiring left empty pending OVMF >4 MiB sprint on m6-2-pr2-amd64-wip. | n/a (MODE B passes; live kernel deferred).                                                                  |
-| riscv64  | dormant (B) | None found in 30-min OCI hunt 2026-06-10 — siderolabs/kernel ships amd64+arm64 only; tinkerbell/hook ships arm64+x86_64 only; Kairos amd64-only; openSUSE/Fedora riscv64 OCI 404. | PASS in MODE B (self-test) — `task kernelboot:live:riscv64`. MODE C dormant pending public ref. |
-| loong64  | dormant (B) | None found — same hunt as riscv64; cr.loongnix.cn refuses anonymous; docker.io/loongarch64/debian is a rootfs without /boot/vmlinuz. | PASS in MODE B (self-test) — `task kernelboot:live:loong64`. MODE C dormant pending public ref. |
+| riscv64  | dormant (B) | None found in expanded 60-min OCI hunt 2026-06-10 (see M8.4 §"Public ref landscape" below). | PASS in MODE B (self-test) — `task kernelboot:live:riscv64`. MODE C dormant pending public ref. |
+| loong64  | dormant (B) | None found in expanded 60-min OCI hunt 2026-06-10 (see M8.4 §"Public ref landscape" below). | PASS in MODE B (self-test) — `task kernelboot:live:loong64`. MODE C dormant pending public ref. |
+
+### M8.4 — Public ref landscape for riscv64 + loong64 (2026-06-10)
+
+A second, more aggressive 60-min OCI hunt was run on 2026-06-10
+following the initial 30-min hunt — looking for ANY publicly
+anonymous-pullable OCI artifact whose layer carries `/boot/vmlinuz`
+as a PE32+ EFI-stub image for riscv64 and/or loong64. Search width:
+distro base / cloud / installer / kernel-only namespaces across
+`ghcr.io`, `quay.io`, `docker.io`, `registry.opensuse.org`,
+`registry.fedoraproject.org`, `registry.openeuler.org`, AWS ECR
+public, Apple/VMware sub-registries, and dedicated arch-org
+namespaces (`loong64/*`, `riscv64/*`, `loongarchlinux/*`,
+`siderolabs/*`, `tinkerbell/*`, `kairos-io/*`, `linuxcontainers/*`,
+`centos-bootc/*`, `fedora-bootc/*`).
+
+Probe tool: `crane manifest` + `crane pull --platform linux/<arch>`
++ `tar tzf | grep vmlinuz`. All probes anonymous, no `~/.docker/config.json`
+credentials. Acceptance criteria: anonymous pull works AND the
+extracted layer contains `boot/vmlinuz*` (PE32+ EFI-stub, MZ + `'ARMd'`
+or LoongArch / RISC-V machine type) AND total kernel-layer payload
+under 50 MB.
+
+#### riscv64 candidates probed
+
+| Candidate ref                                                          | Reachable | Has `/boot/vmlinuz`? | Layer size | Notes |
+|------------------------------------------------------------------------|-----------|----------------------|------------|-------|
+| `ghcr.io/siderolabs/kernel:v1.11.0`                                    | yes       | n/a (no rv64 manifest) | n/a      | Multi-arch index lists ONLY `amd64` + `arm64`. Same for `v1.14.0-alpha.0-76-g09cb04e` (latest nightly probed). |
+| `ghcr.io/siderolabs/installer:v1.11.0` / `installer-base:latest`       | yes       | n/a (no rv64 manifest) | n/a      | amd64 + arm64 only. No `installer-riscv64`, no `kernel-riscv64` (DENIED — repo nonexistent). |
+| `ghcr.io/siderolabs/imager:v1.11.0` / `imager:latest`                  | yes       | n/a (no rv64 manifest) | n/a      | amd64 + arm64 only. |
+| `ghcr.io/siderolabs/talos:v1.11.0`                                     | yes       | n/a                  | n/a        | amd64 + arm64 (`talosctl-linux-riscv64` is published as a CLI release asset, NOT as an OCI kernel layer — confirmed via `gh search code --owner siderolabs riscv64`). |
+| `ghcr.io/tinkerbell/hook:latest` / `hook-kernel:latest`                | yes       | n/a                  | n/a        | `MANIFEST_UNKNOWN` for both `:latest` and `hook-kernel-riscv64:latest`. Tinkerbell hook releases ship arm64 + x86_64 tarballs only. |
+| `ghcr.io/sigstore/cosign/cosign:latest`                                | yes       | no                   | tiny       | Has rv64 manifest (distroless) but contains only the cosign binary, no kernel. |
+| `docker.io/library/debian:sid` (`@linux/riscv64`)                      | yes       | no                   | 46.8 MB    | Standard debuerreotype rootfs — `usr/bin/installkernel` present, no actual `/boot/vmlinuz`. |
+| `docker.io/riscv64/debian:sid` / `riscv64/ubuntu:latest` / `riscv64/alpine:latest` / `riscv64/busybox:latest` | yes | no | 3.6–47 MB | All rootfs only. |
+| `docker.io/library/ubuntu:noble` / `ubuntu:devel`                      | yes       | no                   | ~26 MB     | rv64 manifest present, rootfs only. |
+| `docker.io/library/alpine:latest` (`@linux/riscv64`)                   | yes       | no                   | 3.6 MB     | Apk rootfs only — `apk add linux-virt` would pull kernel at run-time, NOT included. |
+| `registry.opensuse.org/opensuse/tumbleweed:latest` (`@linux/riscv64`)  | yes       | no                   | 37.6 MB    | rpm rootfs only — `usr/bin/get_kernel_version`, `usr/lib/rpm/fileattrs/kernel.attr`, no `/boot/vmlinuz`. |
+| `registry.opensuse.org/opensuse/tumbleweed-microservices:latest`       | yes       | n/a                  | n/a        | No rv64 manifest in the index. |
+| `quay.io/fedora/fedora:rawhide` / `fedora:latest`                      | yes       | n/a                  | n/a        | No rv64 manifest in the Fedora multi-arch index (amd64/arm64/ppc64le/s390x). |
+| `registry.fedoraproject.org/fedora:latest` / `fedora:rawhide`          | yes       | n/a                  | n/a        | Same — no rv64. |
+| `quay.io/fedora/fedora-bootc:rawhide` / `fedora-bootc:42`              | yes       | n/a                  | n/a        | bootc images (which DO ship `/usr/lib/modules/<ver>/vmlinuz`) are amd64/arm64/ppc64le/s390x only. |
+| `quay.io/centos-bootc/centos-bootc:stream10` / `stream9`               | yes       | n/a                  | n/a        | Same set as Fedora bootc — no rv64. |
+| `docker.io/library/almalinux:9` / `quay.io/almalinuxorg/almalinux:9`   | yes       | n/a                  | n/a        | amd64/arm64/ppc64le/s390x/386 — no rv64. |
+| `public.ecr.aws/bottlerocket/bottlerocket-admin:latest` / `-control`   | tag MANIFEST_UNKNOWN | n/a | n/a | Bottlerocket admin/control containers are amd64+arm64 only. AWS does not publish rv64 Bottlerocket. |
+| `ghcr.io/loong64/openeuler:24.03-init-20260426` (`@linux/riscv64`)     | yes       | no                   | 87.7 MB    | `loong64` org repackages openEuler for FIVE arches incl. riscv64 — but the `init`/`base`/`default` variants ship rootfs only, no `/boot/vmlinuz`. Even `init` (largest) is dnf-only stage. |
+| `cr.loongnix.cn/*` (re-probed)                                         | no        | n/a                  | n/a        | Anonymous still 401. |
+
+#### loong64 candidates probed
+
+| Candidate ref                                                          | Reachable | Has `/boot/vmlinuz`? | Layer size | Notes |
+|------------------------------------------------------------------------|-----------|----------------------|------------|-------|
+| `ghcr.io/siderolabs/kernel:*`                                          | yes       | n/a (no loong64 manifest) | n/a   | No loong64 entry across `latest`, `v1.11.0`, `v1.14.0-alpha.0-76-g09cb04e`. |
+| `ghcr.io/siderolabs/installer:*` / `imager:*` / `talos:*`              | yes       | n/a                  | n/a        | amd64 + arm64 only. No `*-loong64` variants. |
+| `ghcr.io/loong64/openeuler:24.03-default-20260426` (`@linux/loong64`)  | yes       | no                   | 94.3 MB    | dnf rootfs only; same kernel-stub artefacts as the riscv64 variant. |
+| `ghcr.io/loong64/openeuler:24.03-init-20260426` (`@linux/loong64`)     | yes       | no                   | 92.3 MB    | Same — no `/boot/vmlinuz`. |
+| `ghcr.io/loong64/openeuler:24.03-base-20260426` (`@linux/loong64`)     | yes       | no                   | 92.0 MB    | Same. |
+| `ghcr.io/loong64/loongnix:23.1-default-20250822` (`@linux/loong64`)    | yes       | no                   | 40.6 MB (zstd) | Loongnix repackaged: AFS overlay rootfs, no `/boot/vmlinuz`. |
+| `ghcr.io/loong64/anolis:latest` / `opencloudos:latest` / `kylin:latest` | yes      | no (rootfs)          | varies     | All three Chinese distros published by `loong64` org, all rootfs-only multi-arch indices (amd64/arm64/loong64). |
+| `ghcr.io/loong64/alpine:latest`                                        | yes       | no                   | small      | apk rootfs only — `apk add linux-virt` would fetch kernel at run-time. |
+| `ghcr.io/loong64/debian:sid`                                           | yes       | no                   | small      | debuerreotype rootfs only. |
+| `docker.io/openeuler/openeuler:24.03-lts`                              | yes       | n/a                  | n/a        | amd64 + arm64 only (no loong64 in upstream Docker Hub index). |
+| `docker.io/loongarch64/debian:sid` / `loongarch64/ubuntu:latest`       | tag MANIFEST_UNKNOWN | n/a | n/a    | These docker.io namespaces are empty / undocumented. |
+| `cr.loongnix.cn/*` (re-probed)                                         | no        | n/a                  | n/a        | Anonymous 401 — Loongnix registry requires account. |
+| `swr.cn-north-4.myhuaweicloud.com/openeuler/*`                         | no        | n/a                  | n/a        | Tag-discovery requires Huawei Cloud auth even for nominally-public read. |
+| `dr.openkylin.top/*`                                                   | not OCI   | n/a                  | n/a        | openKylin distributes ISO/squashfs over HTTP, no OCI distribution endpoint. |
+| `ghcr.io/openeuler/*` / `ghcr.io/openkylin/*` / `ghcr.io/loongson/*`   | tag MANIFEST_UNKNOWN | n/a | n/a    | These ghcr.io orgs either don't publish OCI containers or scope them to private. |
+| `registry.gitlab.com/loongarchlinux/archlinux:latest` / `openeuler/openeuler:latest` | no | n/a | n/a | GitLab registry refuses anonymous. |
+| `ghcr.io/linuxcontainers/alpine:edge` / `debian:sid`                   | tag MANIFEST_UNKNOWN | n/a | n/a | LXC images for these arches don't exist on ghcr.io; the canonical http://images.linuxcontainers.org tree is not OCI-distributed. |
+
+#### Conclusion
+
+After 60 minutes of expanded search, **no public anonymous-pullable
+OCI artifact exists in any of the probed registries that carries a
+`/boot/vmlinuz` EFI-stub Linux kernel for riscv64 or loong64**. The
+universal pattern is:
+
+- Distro base images on docker.io / quay.io / ghcr.io that DO support
+  riscv64 (debian, ubuntu, alpine, opensuse tumbleweed) ship as
+  pure rootfs tarballs without `/boot/vmlinuz` (kernel comes from
+  the host or from a separate `apk add linux-virt` / `apt install
+  linux-image-riscv64` at run-time, neither of which is reachable
+  from a non-running TamaGo EFI).
+- Kernel-shipping OCI artefacts that DO exist (Talos
+  `siderolabs/kernel`, Tinkerbell hook, Bottlerocket, Fedora /
+  CentOS bootc) cover only amd64+arm64 (and sometimes ppc64le /
+  s390x); none ship riscv64 or loong64 layers.
+- Chinese distros most likely to ship loong64 kernels (Loongnix,
+  openKylin, Anolis) are either: (a) only on the Loongnix-internal
+  registry behind authentication, (b) repackaged as rootfs-only
+  containers on ghcr.io via the `loong64` org, or (c) distributed as
+  ISO/qcow2 over plain HTTP rather than OCI.
+
+The two-arch dormant state in M8.3 / M8.4 framework is therefore
+correct and remains the right outcome. Both arches will flip live
+the day:
+
+- siderolabs adds `riscv64` / `loong64` platforms to the
+  `ghcr.io/siderolabs/kernel` multi-arch index (open-source feature
+  request — they already ship the riscv64 cross-compile pipeline in
+  `siderolabs/pkgs:kernel/build/config-arm64`'s "Loongson" hunk and
+  the talosctl-linux-riscv64 binary), OR
+- `loong64` org publishes a `ghcr.io/loong64/kernel:*` ORAS
+  artifact alongside the existing distro images (the org already
+  owns the namespace and the LoongArch kernel build pipeline), OR
+- A new publisher (RISC-V International / OpenSBI / Sipeed Lichee /
+  StarFive VisionFive) ships an EFI-stub vmlinuz as an OCI
+  artifact.
+
+Filing requests is a maintainer-facing action — list of candidate
+upstream issue trackers:
+
+| Upstream                            | Issue tracker                                                        |
+|-------------------------------------|----------------------------------------------------------------------|
+| Talos / Sidero Labs                 | https://github.com/siderolabs/pkgs/issues  (kernel build pipeline)   |
+| Tinkerbell hook                     | https://github.com/tinkerbell/hook/issues                            |
+| AWS Bottlerocket                    | https://github.com/bottlerocket-os/bottlerocket/issues               |
+| loong64 org (LoongArch repackage)   | https://github.com/loong64/.github/issues                            |
+| openEuler container images          | https://github.com/openeuler/community/issues                        |
+| Loongnix Linux                      | https://github.com/loongson-community (no public issue tracker — file via Loongnix mailing list) |
+| openKylin                           | https://gitee.com/openkylin/community                                |
 
 Per-arch constants live in `kernelboot_<arch>.go` next to
 `phase2_oci_kernel_boot.go`. The dispatcher consumes them via the
