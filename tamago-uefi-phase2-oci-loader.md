@@ -214,7 +214,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
-| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 landscape ENUMERATED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar; both arches stay dormant.** |
+| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 self-publish SHIPPED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar. CLOSED via §M8.4 "self-publish" (2026-06-10): `cmd/cloudboot-oci-extract` extracts vmlinuz from Debian linux-image / linux-binary .deb, validates PE32+ + COFF Machine, re-packages as tar.gz `boot/vmlinuz` layer, pushes to ttl.sh anonymous-24h. Both arches now MODE C with live kernel boot (Linux 6.12.90 riscv64 + Linux 7.0.12 loong64) verified.** |
 | **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a OPEN (DTB-absence Data Abort)** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel side blocked on R-M8.5a — firmware Data Abort because EDK2 arm64 publishes ACPI + SMBIOS but no DTB, and the empty-DTB patch path in EFI-stub null-derefs (FAR=0x40). Cmdline broadened to acpi=force + earlycon=pl011,mmio32 + rdinit=/init pre-emptively but the crash is pre-cmdline-parse. M8.6 mitigation: publish a DTB via gBS->InstallConfigurationTable from Go.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
@@ -223,8 +223,8 @@ time, from PCI device discovery up to Linux kernel handoff.
 |----------|-------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | PASS — EFI-stub prints "Booting Linux Kernel..." + KASLR + DTB + initrd-load attempts (see M8.3 dump below). |
 | amd64    | dormant (B) | siderolabs/kernel ships amd64 too; wiring left empty pending OVMF >4 MiB sprint on m6-2-pr2-amd64-wip. | n/a (MODE B passes; live kernel deferred).                                                                  |
-| riscv64  | dormant (B) | None found in expanded 60-min OCI hunt 2026-06-10 (see M8.4 §"Public ref landscape" below). | PASS in MODE B (self-test) — `task kernelboot:live:riscv64`. MODE C dormant pending public ref. |
-| loong64  | dormant (B) | None found in expanded 60-min OCI hunt 2026-06-10 (see M8.4 §"Public ref landscape" below). | PASS in MODE B (self-test) — `task kernelboot:live:loong64`. MODE C dormant pending public ref. |
+| riscv64  | C     | `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64`, see §M8.4 self-publish) | PASS — Linux 6.12.90 boots end-to-end: `EFI stub: Booting Linux Kernel...` + `Loaded initrd` + `Linux version 6.12.90+deb13.1-riscv64` + TOMOYO init + pps_core registered, panics-no-init at +0.85s as expected (stub initrd has no /init). |
+| loong64  | C     | `ttl.sh/cloudboot-vmlinuz-loong64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64`, see §M8.4 self-publish) | PASS — Linux 7.0.12 boots end-to-end: `Linux version 7.0.12+deb14-loong64` + TOMOYO init + pps_core + X.509 build-key load, panics-no-init at +0.81s as expected. |
 
 ### M8.4 — Public ref landscape for riscv64 + loong64 (2026-06-10)
 
@@ -362,6 +362,128 @@ amd64    console=ttyS0,115200 earlyprintk=ttyS0,115200
 riscv64  console=hvc0 earlycon=sbi
 loong64  console=ttyS0,115200
 ```
+
+### M8.4 self-publish — extract + repackage + push toolchain (SHIPPED 2026-06-10)
+
+The §"Public ref landscape" search confirmed no upstream publishes an
+EFI-stub vmlinuz as a standalone OCI artifact for riscv64 or
+loong64. The kernels DO exist as PE32+ EFI-stub binaries — they live
+inside Debian's `linux-image-*-riscv64.deb` and
+`linux-binary-*-loong64.deb` packages under `/boot/vmlinuz-*` (or
+`/boot/vmlinux-*` on riscv64 6.12.x where CONFIG_EFI_ZBOOT=n makes
+the EFI-stub wrap the uncompressed `vmlinux`). Rather than wait for
+upstream publishers to ship OCI artifacts, we extract from the .deb
+ourselves and re-publish.
+
+**Toolchain**: `cmd/cloudboot-oci-extract/main.go` (pure Go, no CGO,
+host-side CLI). Pipeline:
+
+```
+deb URL → http.Get → ar archive walk → data.tar.xz → xz.NewReader →
+   tar walk → first /boot/vmlinuz* or /boot/vmlinux* matching arch →
+   PE32+ validation (MZ at 0; PE\0\0 at pe_offset; COFF Machine
+   matches arch: 0x5064 rv64, 0x6264 loong64, 0xaa64 arm64,
+   0x8664 amd64) →
+   tar.gz wrap as boot/vmlinuz (matches streamExtractVmlinuz wire
+   shape) →
+   OCI Distribution v2 push (POST uploads, PUT blob?digest=, PUT
+   manifest) → ttl.sh anonymous, 24h TTL.
+```
+
+**Sources used (2026-06-10)**:
+
+| Arch    | Source .deb (Debian pool/main/l/linux/)                     | Raw kernel               | Layer tar.gz | OCI ref                                  |
+|---------|--------------------------------------------------------------|--------------------------|--------------|-------------------------------------------|
+| riscv64 | `linux-image-6.12.90+deb13.1-riscv64_6.12.90-2_riscv64.deb`  | 31.2 MB (`vmlinux-*`)    | 10.8 MB      | `ttl.sh/cloudboot-vmlinuz-riscv64:24h`    |
+| loong64 | `linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb`     | 8.7 MB (`vmlinuz-*`)     | 8.3 MB       | `ttl.sh/cloudboot-vmlinuz-loong64:24h`    |
+
+The riscv64 deb13.1 variant was picked because the deb14 split moves
+the actual binary to a separate `linux-binary-*-riscv64` package whose
+filename is `vmlinux` (without EFI wrap on some sub-versions);
+6.12.90+deb13.1 keeps `/boot/vmlinux-*` as a PE32+ EFI application
+with COFF Machine 0x5064 confirmed by `file`. For loong64 only the
+deb14 `linux-binary-*` split exists; its `/boot/vmlinuz-*` is the
+PE32+ EFI-stub.
+
+**Build + push**:
+
+```
+GOWORK=off go build -o /tmp/cb-extract/cloudboot-oci-extract \
+  ./cmd/cloudboot-oci-extract/
+
+/tmp/cb-extract/cloudboot-oci-extract \
+  -src 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-image-6.12.90+deb13.1-riscv64_6.12.90-2_riscv64.deb' \
+  -arch riscv64 \
+  -dst 'ttl.sh/cloudboot-vmlinuz-riscv64:24h' \
+  -cmdline-hint 'console=hvc0 earlycon=sbi'
+
+/tmp/cb-extract/cloudboot-oci-extract \
+  -src 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb' \
+  -arch loong64 \
+  -dst 'ttl.sh/cloudboot-vmlinuz-loong64:24h' \
+  -cmdline-hint 'console=ttyS0,115200'
+```
+
+**Permanence gap**: ttl.sh expires its anonymous tags 24h after the
+last push. Two follow-up paths to make the riscv64 + loong64 MODE C
+constants permanent:
+
+1. **Nightly GitHub Action** under cloud-boot/ops — invokes the tool
+   on a cron, refreshing the ttl.sh tag every ~20h. Trade-off: the
+   tag URL stays stable but the underlying blob digest rotates daily,
+   so any signature pinning (cosign verify) needs re-sign on each
+   re-publish. Low effort (one workflow YAML + the tool binary).
+2. **PAT-authenticated push to ghcr.io/cloud-boot/vmlinuz-<arch>** —
+   permanent repo, no TTL. Requires adding bearer-token auth to the
+   extractor's push leg (one Authorization header on each POST/PUT)
+   and a `write:packages` PAT in repo secrets. Moves the artifact
+   under cloud-boot's namespace where we control retention.
+
+**RAM-budget side-effect**: the streaming + tar walk pipeline needs
+peak heap of roughly `raw_kernel + tar.gz + tar.Reader sliding window`
+(~42 MiB on riscv64 for the 31 MB vmlinux). The pre-self-publish
+`uefiboard/board_riscv64.go` `RamSize = 32 MiB` and
+`board_loong64.go` `RamSize = 64 MiB` were both bumped to 128 MiB
+(matching arm64) to give the streamer the same headroom it has on
+arm64 — see commits flagged "RamSize" on the cloud-boot/tamago-uefi
+repo.
+
+**Live test acceptance (2026-06-10)**:
+
+```
+$ task kernelboot:live:riscv64
+[live-kernelboot:riscv64] PASS — wall=23234ms
+
+$ task kernelboot:live:loong64
+[live-kernelboot:loong64] PASS — wall=22215ms
+
+$ task kernelboot:live:arm64
+[live-kernelboot:arm64] PASS — wall=180629ms   (unchanged — arm64 still uses siderolabs)
+```
+
+Per-arch kernel-side trace (last 5 lines before panic-no-init, which
+is expected — the embedded stub initrd has no real /init):
+
+```
+riscv64:
+  EFI stub: Booting Linux Kernel...
+  EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+  EFI stub: Generating empty DTB
+  [    0.000000] Linux version 6.12.90+deb13.1-riscv64 …
+  [    0.231497] pps_core: LinuxPPS API ver. 1 registered
+
+loong64:
+  [    0.000000] Linux version 7.0.12+deb14-loong64 …
+  [    0.018611] TOMOYO Linux initialized
+  [    0.604710] Loaded X.509 cert 'Build time autogenerated kernel key: …'
+  [    0.811864] Kernel panic - not syncing: No working init found.
+  [    0.817207] Rebooting in 10 seconds..
+```
+
+The mechanism (OCI fetch → tar walk → PE32+ validate → LoadImage →
+SetLoadOptions → PublishInitrd → StartImage → EFI-stub → Linux
+init) is now proven for all three publicly-validated arches
+(arm64 + riscv64 + loong64).
 
 
 ### M0 — Probe + type surface (done)
