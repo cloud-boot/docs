@@ -52,8 +52,13 @@ whole networked-OCI pipeline from inside Boot Services.
     via [TamaGo](https://github.com/usbarmory/tamago). PCI walk →
     virtio-net → DHCPv4 → DNS → TLS (CCADB roots) → HTTPS → OCI
     Distribution v2 → cosign verify → `LoadImage` → `StartImage` →
-    Linux. **Live end-to-end on arm64 + riscv64 + loong64**
-    (2026-06-10) ; amd64 firmware-bug chase ongoing.
+    real Debian 13 userspace. **Live end-to-end Linux userspace
+    on all four arches** (amd64 + arm64 + riscv64 + loong64) as of
+    2026-06-10 — 16-18 s wall-clock from a cold DHCP lease.
+    `R-amd64j` closed the amd64 saga via an `initrd=` cmdline
+    workaround for the EDK2 OVMF amd64 `LoadFile2` quirk ; the
+    other three arches use the `LoadFile2` protocol the kernel
+    prefers.
 
 </div>
 
