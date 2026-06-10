@@ -214,7 +214,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
-| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 self-publish SHIPPED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar. CLOSED via §M8.4 "self-publish" (2026-06-10): `cmd/cloudboot-oci-extract` extracts vmlinuz from Debian linux-image / linux-binary .deb, validates PE32+ + COFF Machine, re-packages as tar.gz `boot/vmlinuz` layer, pushes to ttl.sh anonymous-24h. Both arches now MODE C with live kernel boot (Linux 6.12.90 riscv64 + Linux 7.0.12 loong64) verified.** |
+| **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 self-publish SHIPPED 2026-06-10; 24h-TTL permanence gap CLOSED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar. CLOSED via §M8.4 "self-publish" (2026-06-10): `cmd/cloudboot-oci-extract` extracts vmlinuz from Debian linux-image / linux-binary .deb, validates PE32+ + COFF Machine, re-packages as tar.gz `boot/vmlinuz` layer, pushes to ttl.sh anonymous-24h. Both arches now MODE C with live kernel boot (Linux 6.12.90 riscv64 + Linux 7.0.12 loong64) verified. Permanence gap closed by `.github/workflows/vmlinuz-nightly.yml` (cron 04:00 UTC, ttl.sh always-on + optional ghcr.io bearer-auth gated on `GHCR_TOKEN` secret) — see §M8.4 self-publish "Permanence gap CLOSED".** |
 | **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a OPEN (DTB-absence Data Abort)** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel side blocked on R-M8.5a — firmware Data Abort because EDK2 arm64 publishes ACPI + SMBIOS but no DTB, and the empty-DTB patch path in EFI-stub null-derefs (FAR=0x40). Cmdline broadened to acpi=force + earlycon=pl011,mmio32 + rdinit=/init pre-emptively but the crash is pre-cmdline-parse. M8.6 mitigation: publish a DTB via gBS->InstallConfigurationTable from Go.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
@@ -424,20 +424,106 @@ GOWORK=off go build -o /tmp/cb-extract/cloudboot-oci-extract \
   -cmdline-hint 'console=ttyS0,115200'
 ```
 
-**Permanence gap**: ttl.sh expires its anonymous tags 24h after the
-last push. Two follow-up paths to make the riscv64 + loong64 MODE C
-constants permanent:
+**Permanence gap CLOSED (2026-06-10)**: ttl.sh expires its anonymous
+tags 24h after the last push. Closed via two layered paths, both
+wired in `cloud-boot/tamago-uefi`:
 
-1. **Nightly GitHub Action** under cloud-boot/ops — invokes the tool
-   on a cron, refreshing the ttl.sh tag every ~20h. Trade-off: the
-   tag URL stays stable but the underlying blob digest rotates daily,
-   so any signature pinning (cosign verify) needs re-sign on each
-   re-publish. Low effort (one workflow YAML + the tool binary).
-2. **PAT-authenticated push to ghcr.io/cloud-boot/vmlinuz-<arch>** —
-   permanent repo, no TTL. Requires adding bearer-token auth to the
-   extractor's push leg (one Authorization header on each POST/PUT)
-   and a `write:packages` PAT in repo secrets. Moves the artifact
-   under cloud-boot's namespace where we control retention.
+**Path A — Nightly GitHub Action (always on)**: SHIPPED at
+[`.github/workflows/vmlinuz-nightly.yml`](https://github.com/cloud-boot/tamago-uefi/blob/main/.github/workflows/vmlinuz-nightly.yml).
+Runs on cron `0 4 * * *` (04:00 UTC daily, ~20h after a typical
+previous-day push so the ttl.sh 24h window never gaps) plus
+`workflow_dispatch` for manual re-runs. Strategy matrix over
+`{riscv64, loong64}` — independent fail-fast=false jobs so one arch
+failing does not block the other. Per arch:
+
+1. `actions/checkout@v4` + `actions/setup-go@v5` (Go 1.26.x, no
+   module cache — the tool's deps are tiny and a stale cache is
+   strictly worse than re-resolving).
+2. `GOWORK=off go build -o /tmp/cloudboot-oci-extract
+   ./cmd/cloudboot-oci-extract/`.
+3. Invoke the extractor against the Debian .deb URL, push to
+   `ttl.sh/cloudboot-vmlinuz-<arch>:24h` with the cmdline-hint per
+   arch (same matrix that drove the original 2026-06-10
+   self-publish — see table above).
+4. Smoke-pull the freshly-pushed manifest via curl against
+   `https://ttl.sh/v2/<repo>/manifests/<tag>` to confirm the tag
+   resolves before the job exits.
+
+Trade-off: the tag URL `ttl.sh/cloudboot-vmlinuz-<arch>:24h` stays
+stable across re-publishes (the constant in
+`kernelboot_<arch>.go` does NOT need to change), but the underlying
+blob digest rotates each night with the source `.deb`. Any future
+signature pinning (cosign verify) therefore needs re-sign on each
+re-publish — that's a known trade-off of the ttl.sh leg.
+
+**Path B — Stable bearer-auth push to ghcr.io (gated on
+`GHCR_TOKEN` secret)**: SHIPPED in the same workflow + a ~50 LoC
+delta to `cmd/cloudboot-oci-extract/main.go` adding:
+
+- `-push-to-ghcr <ref>` flag (e.g. `ghcr.io/cloud-boot/vmlinuz-riscv64:latest`).
+- `GHCR_TOKEN` env-var read inside the tool (NOT a flag — keeps
+  secrets out of process listings).
+- A `bearerToken` argument threaded through `pushOCI`; when
+  non-empty, every POST + PUT in the upload sequence carries
+  `Authorization: Bearer $GHCR_TOKEN`.
+
+Behaviour: when `GHCR_TOKEN` is unset OR the flag is empty, the
+secondary push leg is skipped with a one-line `::notice::ghcr.io
+push skipped: no GHCR_TOKEN secret` so the workflow does not fail
+on repos that have not yet provisioned a PAT. When both ttl.sh and
+ghcr.io legs succeed, exit-code is 0; if either fails, exit-code is
+non-zero (workflow turns red, GitHub email notification fires).
+
+**Secret provisioning (run once per repo, by the cloud-boot
+maintainer)**: ghcr.io requires a PAT with scope `write:packages`
+(also `read:packages` for the pull side). Two options:
+
+```sh
+# Option 1 — gh-cli generated short-lived token (preferred, no
+# manual token management):
+gh auth refresh -h github.com -s write:packages
+gh secret set GHCR_TOKEN --body "$(gh auth token)" \
+  --repo cloud-boot/tamago-uefi
+
+# Option 2 — classic PAT (long-lived; rotate manually):
+# 1. Visit https://github.com/settings/tokens
+# 2. Generate new token (classic) with scopes:
+#      write:packages, read:packages
+# 3. Copy the token, then:
+gh secret set GHCR_TOKEN --body '<paste-PAT>' \
+  --repo cloud-boot/tamago-uefi
+```
+
+Confirm the secret is set:
+
+```sh
+gh secret list --repo cloud-boot/tamago-uefi | grep GHCR_TOKEN
+# GHCR_TOKEN  Updated YYYY-MM-DD
+```
+
+The first cron run after `gh secret set` will publish to
+`ghcr.io/cloud-boot/vmlinuz-{riscv64,loong64}:latest`. From then on
+the consumers (`kernelboot_<arch>.go`) MAY switch to the ghcr.io ref
+(stable, no TTL) instead of `ttl.sh/...:24h` — that swap is a
+single-line const change and is left for the maintainer to flip
+once the first nightly ghcr.io run is verified green. Until then,
+the `kernelboot_<arch>.go` constants continue to point at ttl.sh
+(see "Constant stability" below).
+
+**Constant stability — does `kernelBootTargetRef` need to change on
+each re-publish?** No.
+
+- ttl.sh: the constant references the SAME ref
+  (`ttl.sh/cloudboot-vmlinuz-<arch>:24h`) across runs because the
+  workflow overwrites the tag with a fresh 24h TTL. The blob digest
+  underneath rotates, but the in-tree consumer
+  (`phase2_oci_kernel_boot.go`'s streamer) discovers the digest
+  from the manifest at boot, so the rotation is transparent.
+- ghcr.io: same story for the `:latest` tag once the maintainer
+  flips the constants over. For pinned-digest deployments
+  (cosign-verified, repro-builds), set the constant to
+  `ghcr.io/cloud-boot/vmlinuz-<arch>@sha256:<digest>` instead;
+  that pin needs a manual bump on each upstream kernel rev.
 
 **RAM-budget side-effect**: the streaming + tar walk pipeline needs
 peak heap of roughly `raw_kernel + tar.gz + tar.Reader sliding window`
