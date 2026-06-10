@@ -1,7 +1,7 @@
 ---
 title: M6.2 amd64 firmware bug — EDK2 upstream investigation
-status: patched OVMF integrated 2026-06-09; M8.0 chainedhello + EFIHANDOVER unblocked; HTTPS / OCI #PF root-caused (R-amd64a § 11); AllocatePages cpuinit rewrite attempted (R-amd64b § 12) hit rt0 secondary regression and is staged on m6-2-pr2-amd64-wip-r-amd64b for R-amd64c
-last-updated: 2026-06-09
+status: patched OVMF integrated 2026-06-09; M8.0 chainedhello + EFIHANDOVER unblocked; HTTPS / OCI #PF root-caused (R-amd64a § 11); AllocatePages cpuinit rewrite attempted (R-amd64b § 12) hit rt0 secondary regression and is staged on m6-2-pr2-amd64-wip-r-amd64b; R-amd64c § 13 added SP-align nudge + ConOut markers (no progress); R-amd64d § 14 rules out H1/H2/H3 — register dump proves fault is INSIDE firmware AllocatePages dispatch, not in Go runtime; WIP branch held back for R-amd64e (move AllocatePages out of cpuinit / use isa-debugcon to probe OVMF AllocatePages internals)
+last-updated: 2026-06-10
 ---
 
 # M6.2 amd64 firmware bug — EDK2 upstream investigation
@@ -1096,4 +1096,244 @@ Sprint cap 120 min. Spent ~120 min on:
 - (~15 min) SUBQ $8 alignment test + variant matrix.
 - (~20 min) strip the marker code back out and document
   findings in this § 13.
+
+## 14. R-amd64d — register-dump root-cause + arm64-mirror minimisation (2026-06-10)
+
+### 14.1 Goals (per § 13.8)
+
+1. Cross-check `firstmoduledata` GC bitmap layout on arm64 vs amd64
+   (the § 13.7 H1 hypothesis: under R-amd64b `Bloc = heapBase` lies
+   OUTSIDE the binary's loaded address range; the GC scan paths over
+   Bloc/blocMax vs firstmoduledata.{data,bss,…} no longer overlap;
+   amd64-specific runtime code may assume they do).
+2. If H1 holds, write a tamago-pie LOCAL patch to keep firstmoduledata
+   and Bloc consistent; save to
+   `cloud-boot/docs/tamago-pie-amd64-firstmoduledata-sync.patch`.
+3. Validate the fix against the amd64 smoke matrix; gate merge of
+   `m6-2-pr2-amd64-wip-r-amd64b` to main on the result.
+
+### 14.2 H1 ruled out — fault is INSIDE AllocatePages dispatch, not the runtime
+
+Re-ran the R-amd64c shipped tree (commit `ad7aad4`, HEAD of
+`m6-2-pr2-amd64-wip-r-amd64b` at sprint start) fresh against patched
+OVMF (`edk2-stable202605`, `-m 2048`). Reproduced all 8 cells FAIL
+with the published RIP signature; the full register dump (all eight
+cells identical to within `R15`) is:
+
+```text
+!!!! X64 Exception Type - 0D(#GP - General Protection) !!!!
+RIP  - 55415641E5894855, CS  - 0000000000000038
+RAX  - 0000000080010033, RCX - 0000000000000000, RDX - 0000000000000002
+RBX  - 0000000000000668, RSP - 000000007FE3D968, RBP - 000000007FE3DA10
+RSI  - 0000000000000009, RDI - 000000007E3E7818
+R8   - 0000000000008000, R9  - 000000000068FB00, R10 - 000000007FE64EA0
+R11  - 000000007FE4EDD8, R12 - 0000000000000000, R13 - 000000007FE3D998
+R14  - 0000000000000000, R15 - 000000007D8BC018
+CR3  - 000000007FC01000
+```
+
+Decoding the register state against the cpuinit source (§ 12.1, file
+`uefiboard/cpuinit_amd64.s` at `ad7aad4`):
+
+| Register   | R-amd64c instruction setting it                            | Value at fault     | Interpretation                                                       |
+|------------|------------------------------------------------------------|--------------------|----------------------------------------------------------------------|
+| `R10`      | `MOVQ EFI_ST_BOOTSERVICES(DX), R10`                        | `0x7FE64EA0`       | gBS pointer, looks valid (firmware data region)                      |
+| `R11`      | `MOVQ EFI_BS_ALLOCATEPAGES(R10), R11`                      | `0x7FE4EDD8`       | AllocatePages function pointer, looks valid (firmware text region)   |
+| `R8`       | `MOVQ runtime∕goos·RamSize(SB), R8; SHRQ $12, R8`          | `0x8000`           | 128 MiB / 4 KiB = 32768 pages, correct                               |
+| `RCX`      | `MOVQ $EFI_ALLOCATE_ANY_PAGES, CX`                         | `0x0`              | EFI_ALLOCATE_ANY_PAGES = 0, correct                                  |
+| `RDX`      | `MOVQ $EFI_LOADER_DATA, DX`                                | `0x2`              | EfiLoaderData = 2, correct                                           |
+| `R13`      | `MOVQ SP, R13` (the SP-stash before the pre-CALL align)    | `0x7FE3D998`       | firmware-stack SP at the CALL site (well above the fault RSP)        |
+| `RSP`      | post-CALL, deep in firmware's AllocatePages internals      | `0x7FE3D968`       | 48 bytes below R13 — inside the firmware's own frames                |
+| `R12`      | `MOVQ ·heapBase(SB), R12` (POST-CALL — never reached)      | `0x0`              | The R-amd64b post-CALL anchor line did NOT run                       |
+| `RIP`      | (firmware's indirect dispatch)                             | `0x55415641_E5894855` | Non-canonical; byte pattern of a Go function prologue                |
+
+The combination is unambiguous: **the fault is INSIDE the firmware's
+AllocatePages function**, partway through its dispatch, BEFORE
+returning to our post-CALL line that anchors `R12 = heapBase`.
+The non-canonical RIP is what a firmware indirect call yielded when
+it dereferenced a vtable that landed in our binary's `.text`
+(Go-prologue bytes), then tried to jump to those bytes as a
+function address. The runtime never executes; H1 (firstmoduledata
+GC layout) cannot be the cause because no runtime code runs.
+
+### 14.3 Minimum-arm64-mirror experiment — same failure
+
+Rewrote `uefiboard/cpuinit_amd64.s` to mirror `cpuinit_arm64.s` /
+`cpuinit_riscv64.s` / `cpuinit_loong64.s` AS CLOSELY AS THE x86 ABI
+allows. Dropped every R-amd64b/c "extra":
+
+| Extra                               | R-amd64c | R-amd64d-experiment |
+|-------------------------------------|----------|---------------------|
+| `XORQ R14, R14`                     | yes      | NO                  |
+| Pre-CALL `SP=R13; SUBQ $32; ANDQ $~15` | yes   | NO                  |
+| Post-CALL `MOVQ R13, SP` restore    | yes      | NO                  |
+| `REP STOSB` to zero the 128 MiB heap| yes      | NO                  |
+| `SUBQ $8, SP` alignment nudge       | yes      | NO                  |
+| Direct `JMP runtime·rt0_amd64_tamago`| yes     | NO (use `_rt0_tamago_start` trampoline as arm64 does) |
+
+Kept ONLY: `CLI`, handoff capture, `sse_enable` (mandatory for SSE
+codegen), `gBS->AllocatePages` with MS x64 args (no SP manipulation),
+`RamStart`/`Bloc` anchor, SP setup, JMP via `_rt0_tamago_start`.
+Total cpuinit body 11 instructions vs R-amd64c's 22.
+
+Result against the same 8-cell smoke matrix: **all 8 cells FAIL with
+THE SAME `0x55415641_E5894855` RIP**. Same fault pattern as
+R-amd64c. The "extras" were NOT causing the firmware crash; the
+crash is intrinsic to calling AllocatePages from cpuinit on amd64
+under this firmware.
+
+A second fault pattern emerged in the simplified variant on some
+runs (`R13 = 0` instead of `0x7FE3D998`, `RSP = 0x7FE3D990`): that's
+just because we no longer stash SP into R13, so R13 is whatever
+firmware leftover happened to be there. The RIP is unchanged →
+same root cause.
+
+### 14.4 Bare-metal baseline still reproduces R-amd64a
+
+Reverted `cpuinit_amd64.s`, `eficall_amd64.s`, `board_amd64.go`,
+`board.go` to `main` (the bare-metal `RamStart = &runtime.text -
+64KiB; SP = RamStart + 704MiB - 1MiB` + eficall stack-switch
+version) on the WIP branch's working tree, rebuilt all four amd64
+EFIs, ran the smoke matrix:
+
+```text
+ROW          MODE       SIZE            RESULT
+HTTP         original   3,173,376       PASS
+HTTP         packed     3,097,088       FAIL
+HTTPS        original   4,894,208       FAIL
+HTTPS        packed     3,747,840       FAIL
+OCI          original   5,260,288       FAIL
+OCI          packed     3,890,176       FAIL
+EFIHANDOVER  original   2,570,240       PASS
+EFIHANDOVER  packed     3,243,008       FAIL
+```
+
+HTTP-original + EFIHANDOVER-original PASS — exactly the R-amd64a
+baseline from § 11. The reverts were undone (the WIP branch keeps
+R-amd64c's experimental tree intact for the next sprint to iterate
+on); this run confirms ONLY that there is no second regression
+hiding underneath the AllocatePages-call-crash.
+
+### 14.5 Revised hypotheses for R-amd64e
+
+H1 (firstmoduledata) is RULED OUT — runtime code never runs.
+
+H2 (g0.stack.lo arithmetic) is RULED OUT — runtime code never runs.
+
+H3 (deeper MS x64 alignment) is RULED OUT — even when we strip the
+pre-CALL align dance entirely (cpuinit_amd64.s mirroring arm64),
+the firmware still crashes.
+
+NEW HYPOTHESES:
+
+H4 (highest confidence). **Patched-OVMF AllocatePages dispatches
+through an image-protection-aware path that reads structural
+metadata about the calling image, AND that metadata is corrupted
+by something about how our PIE PE32+ binary is loaded.** The fix
+trio listed in § 1 (commits `5ccb5fff02`, `867fad874a`,
+`b5bab75e58`) reworked the GCD-walking + memory-attribute paths
+in DXE Core. Under the pre-patch firmware the same call crashed
+DIFFERENTLY (#GP at `CpuDxe.dll +0x110C` during StartImage —
+§ 1) for a different reason. Under the post-patch firmware
+the StartImage crash is gone but a different latent dependency
+on a per-image metadata table surfaces now that AllocatePages
+walks the rebuilt GCD memory map. Likely root cause: a stale
+or zeroed pointer in an EFI_LOADED_IMAGE_PROTOCOL slot the
+patched code now de-references.
+
+H5 (medium). **AllocatePages cannot safely be called from cpuinit
+on amd64 EVEN THOUGH it can on arm64/riscv64/loong64.** Some
+amd64-specific firmware initialisation state (interrupt vectors,
+LAPIC routing, the TR / GDT setup the firmware did before
+StartImage) MUST be re-established before any Boot Service call
+returns cleanly — and the framework's bare-metal cpuinit gets
+away with it by NEVER calling firmware. The cross-arch
+asymmetry that explains why arm64 works: ARMv8 has fewer
+implicit per-call invariants (no shadow space, no x87/SSE,
+no TR / TSS / GDT touching), so an immediate Boot Service
+call from cpuinit doesn't trip a latent state-machine.
+
+H6 (lower). **The CALL into firmware's AllocatePages is producing
+the RIP corruption indirectly via the LDT / TSS / IDT.** The
+fault dump shows `LDTR = 0`, `TR = 0x48` (= 9-th GDT entry,
+which is the firmware's task-state segment selector). If our
+cpuinit somehow caused a task switch (impossible in our code
+path, but the firmware might trigger one internally), the TSS
+load would dereference whatever's at the TSS base.
+
+### 14.6 Concrete R-amd64e plan
+
+1. **Move AllocatePages OUT of cpuinit, into a Go function called
+   from hwinit1.** Bootstrap the heap from a bare-metal-style
+   `RamStart = text - 64KiB` with a SMALL `RamSize` (say 32 MiB,
+   sized to fit below `0x80000000` for HTTP/EFIHANDOVER image
+   bases), then have `hwinit1` call AllocatePages for a LARGER
+   heap and re-anchor `Bloc` / `RamStart` upward at runtime.
+   Mid-run re-anchor is hard (existing pointers into the old
+   heap become invalid for sysAlloc bookkeeping) but the runtime
+   has machinery for it (`sysReserveAlignedSbrk` etc).
+2. **Use QEMU `-debugcon file:/tmp/dbg.out -global
+   isa-debugcon.iobase=0x402`** to add ONE-INSTRUCTION `OUTB AL,
+   $0x402` probes inside the patched-OVMF AllocatePages function
+   itself (rebuild OVMF locally with the probe), pinpointing
+   which line dereferences the bad pointer.
+3. **Try `EfiBootServicesData` instead of `EfiLoaderData`** for
+   the AllocatePages call. Tracks: the GCD-walk in commit
+   `5ccb5fff02` differentiates allocation memory-type with
+   respect to image-protection bits; if our `EfiLoaderData`
+   request triggers a path that examines the Loader image's
+   protection state, BootServicesData might skip it.
+4. **Pre-call `gBS->RaiseTPL(TPL_HIGH_LEVEL)`** to mask
+   firmware-internal callbacks (timer interrupts, event hooks)
+   that may run during AllocatePages. The firmware's TPL is
+   TPL_APPLICATION at StartImage; if an event handler fires
+   during our AllocatePages call and the handler trips on the
+   same vtable corruption, masking events removes the trigger.
+
+### 14.7 What shipped this sprint
+
+- **No code changes shipped to the WIP branch.** The R-amd64d
+  arm64-mirror minimisation experiment was applied to the
+  working tree, rebuilt, smoke-tested, and reverted (it didn't
+  improve the matrix). The 4-file revert to `main` was also
+  applied to the working tree, smoke-tested, and reverted
+  (confirmed R-amd64a baseline reproduces). Both rollbacks
+  leave the WIP branch tip at `ad7aad4` for R-amd64e to pick
+  up.
+- This § 14 documents the R-amd64d findings: register-dump
+  decode proving the fault is in firmware AllocatePages
+  dispatch (not in Go runtime); the arm64-mirror minimisation
+  experiment; the H1/H2/H3 rule-outs; the new H4/H5/H6 with
+  R-amd64e concrete probes.
+- No tamago-pie patch shipped — H1's `firstmoduledata`-sync
+  patch (the brief's optional deliverable) is moot once H1
+  is ruled out by the register dump.
+- WIP branch `m6-2-pr2-amd64-wip-r-amd64b` stays distinct from
+  main; smoke matrix is still all-FAIL on amd64; the merge
+  gate remains closed.
+
+### 14.8 Time accounting
+
+Sprint cap 120 min. Spent ~110 min on:
+- (~15 min) read R-amd64a § 11 + R-amd64b § 12 + R-amd64c § 13;
+  read sys_tamago_amd64.s + sys_tamago_arm64.s side-by-side;
+  read mem_sbrk.go + os_tamago.go + symtab.go.
+- (~10 min) cross-check H1: firstmoduledata + Bloc scan paths
+  don't overlap by design (`bloc = goos.Bloc` skip in
+  `osinit` is intentional and arm64 has the same split);
+  arm64 works ⇒ H1 cannot be amd64-specific.
+- (~15 min) set up worktree under
+  `github.com/cloud-boot/tamago-uefi-r-amd64d` (the parent
+  `cloud-boot` directory isn't a git repo so a sibling
+  worktree was needed to keep the relative
+  `replace ../../usbarmory/tamago` resolution intact).
+- (~20 min) rebuild all 4 amd64 EFIs + run smoke matrix
+  baseline at `ad7aad4` (R-amd64c shipped tree) — confirmed
+  all 8 cells FAIL with `0x55415641_E5894855`.
+- (~20 min) write the arm64-mirror minimisation of
+  cpuinit_amd64.s + rebuild + smoke — same FAIL signature.
+- (~10 min) revert 4 files to `main`, rebuild + smoke —
+  confirmed R-amd64a baseline (HTTP+EFIHANDOVER originals
+  PASS, others FAIL). Revert undone.
+- (~20 min) decode the register dump, draft this § 14.
 
