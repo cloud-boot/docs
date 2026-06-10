@@ -2014,7 +2014,7 @@ Consolidated live smoke matrix (QEMU 9.2.0 + EDK2, `-netdev user`):
 | arm64   | PASS (3.17→2.72 MiB) | PASS (4.45→3.29 MiB) | _baseline (rerun pending)_ | _baseline (rerun pending)_ |
 | riscv64 | PASS (2.85→2.68 MiB) | PASS (4.30→3.26 MiB) | PASS (4.62→3.39 MiB) | PASS (1.98→2.55 MiB) |
 | loong64 | PASS (3.13→2.85 MiB) | PASS (4.74→3.45 MiB) | PASS (5.10→3.58 MiB) | PASS (2.16→2.74 MiB) |
-| amd64   | PASS (post R-amd64a..g) | PASS (post R-amd64a..g + network-retry fix 2026-06-10) | PASS / clean retry-exhausted error (post R-amd64a..g + network-retry fix 2026-06-10) | PASS (post R-amd64a..g) |
+| amd64   | PASS (post R-amd64a..g) | PASS (post R-amd64a..g + R-amd64i CLOSED 2026-06-10) | PASS (post R-amd64a..g + R-amd64i CLOSED 2026-06-10) | PASS (post R-amd64a..g) |
 
 Sizes are `(original on-disk) → (packed envelope on-disk)`. The
 EFIHANDOVER row on riscv64/loong64 is mildly anti-compressed because
@@ -2103,6 +2103,153 @@ Shipped:
 Live amd64 re-test result (post-retry, fresh build of
 `BOOTX64-HTTPS.EFI` + `BOOTX64-OCI.EFI`): see the updated row in
 the consolidated smoke matrix above.
+
+#### R-amd64h partial — heap 128→256 MiB + rxLoop idle-yield (2026-06-10)
+
+Two TamaGo amd64 follow-ups surfaced after the R-amd64a..g
+firmware/runtime saga closed:
+
+1. **Heap pressure on HTTPS/OCI cells.** Bumped cpuinit's `.bss`-anchored
+   heap reservation 128→256 MiB for headroom across TCP retry + TLS
+   handshake + dial-retry telemetry working sets.
+2. **rxLoop alloc churn on amd64.** go-virtio/net's `ErrReceiveTimeout`
+   sentinel is a string-typed `commonNetError`. On arm64/riscv64/loong64
+   the rxLoop goroutine never runs (no async preemption at the M6.2
+   boundary — the inline RX pump in `dialTCP4Once` / `resolveARP` /
+   `PingOnce` / `ReadFrom` is the authoritative receiver). On amd64
+   post-R-amd64g (preemption live) the rxLoop IS scheduled and the
+   per-iteration `error`-interface box of `ErrReceiveTimeout` is a
+   16-byte mallocgc at MHz rate → heap exhaustion mid-dial. Fix: 1 µs
+   `time.Sleep` on the idle (no-frame) path, ~3 orders of magnitude
+   reduction. Latency-sensitive RX still flows through the zero-sleep
+   inline pump.
+
+Shipped at `tamago-uefi@27e974f`. Cleared real allocation pressure
+but did NOT fully unblock the amd64 HTTPS/OCI rows — the port-443
+timeout still fired after 3 retries. R-amd64i queued for the
+pcap-driven root cause investigation.
+
+#### R-amd64i — TLS dial-budget split underflows on amd64 (CLOSED 2026-06-10)
+
+The other half of the R-amd64h chase. With R-amd64h shipped, amd64
+HTTP + EFIHANDOVER cells were green (4/8) but HTTPS + OCI still
+failed with `dial attempts exhausted (3 tries): TCP operation timed
+out`. R-amd64h's heap/rxLoop diagnosis was correct on its own merits
+but didn't address the port-443 timeout.
+
+**Diagnosis: pcap-driven, QEMU `-object filter-dump`.** A one-shot
+capture script (`/tmp/amd64-https-capture.sh`, kept out of tree) re-ran
+just the HTTPS amd64 cell with `filter-dump` writing every Ethernet
+frame to `/tmp/amd64-https.pcap`. Decode with `tcpdump -r ... -nn -tt`
+showed:
+
+- DHCP DISCOVER + OFFER + REQUEST + ACK — OK.
+- ARP for 10.0.2.3 (DNS) + reply — OK.
+- DNS A? `example.com` + answer (172.66.147.243, 104.20.23.154) — OK.
+- ARP for 10.0.2.2 (gateway) + reply + ICMP echo + reply — OK.
+- `phase2-https: GET https://example.com/` printed.
+- **THREE additional DNS queries fired 23 ms + 3 ms apart** (one per
+  retry attempt of `DialTLSWithRetry`), then 86 s of total silence.
+- **ZERO TCP SYN packets on the wire across the entire 90 s run.**
+
+So the SYN was never being emitted. Compare the port-80 control
+pcap: HTTP fires SYN to `104.20.23.154.80` ~10 ms after DNS reply,
+SYN-ACK back, ESTABLISHED, GET, 200 OK, FIN — all in 40 ms.
+
+`println` instrumentation added to `dialTLSOnce` (the M6 TLS single-shot
+core, in `uefiboard/ministack/tls.go`) immediately surfaced the
+mechanism. The function had this shape (pre-fix):
+
+```go
+deadline := time.Now().Add(timeout)
+// ...
+resolveBudget := time.Until(deadline)
+if resolveBudget <= 0 { return nil, ErrTCP4Timeout }
+ip, err = s.ResolveA(host, dnsServer, resolveBudget)
+// ...
+dialBudget := time.Until(deadline)
+if dialBudget <= 0 { return nil, ErrTCP4Timeout }
+tcpConn, err := s.DialTCP4(ip, port, dialBudget)
+```
+
+The instrumented run logged
+`dialBudget -16m36.542497377s` on a deadline set 15 s in the future
+**just two source lines earlier**. Same on the next retry:
+`dialBudget -16m41.089541798s`. The `time.Until(deadline) <= 0`
+check then short-circuited to `ErrTCP4Timeout` — explaining the
+zero-SYN pcap exactly.
+
+**Root cause.** TamaGo amd64 (post-R-amd64g, with async preemption
+live) is not robust to consecutive `time.Now()` reads across a
+goroutine reschedule. Between the `deadline = time.Now().Add(15 s)`
+line and the `time.Until(deadline)` line a few statements later, the
+rxLoop goroutine got scheduled (R-amd64h made it sleep 1 µs per idle
+iteration instead of busy-looping, but it still runs) and the monotonic
+clock domain stepped forward by minutes. The "split the wall-clock
+budget across ResolveA + DialTCP4" pattern was a refinement that
+worked fine on arm64/riscv64/loong64 (no async preemption yet — the
+deadline math executes without an intervening reschedule) and silently
+broke on amd64. HTTP didn't trip the same code path because
+`HTTPGet`'s `dialTLSOnce`-equivalent in `http.go` does NOT split the
+budget — it passes the timeout straight to `DialTCP4`.
+
+**Fix.** `dialTLSOnce` no longer computes `deadline := time.Now().Add(timeout)`
+and no longer reads `time.Until(deadline)` mid-function. The
+per-call `timeout` is passed straight to `ResolveA` (uses its own
+`newDeadlineChecker`) and to `DialTCP4` (uses its own dial-loop
+checker). The TLS handshake's read deadline is computed by ONE
+`time.Now().Add(timeout)` call post-dial. Net: still bounded by the
+caller's `DialTimeout` knob; one `time.Now()` read per stage instead
+of three (with cross-stage subtraction). The retry-with-backoff loop
+still bounds cumulative wall-clock.
+
+Reproducibility check, post-fix:
+
+```
+phase2-https: GET https://example.com/
+phase2-https: status   = HTTP/1.1 200 OK
+phase2-https: code     = 200
+phase2-https: bytes    = 559
+phase2-https: ct-hdr   = text/html
+phase2-https: preview  = <!doctype html><html lang="en"><head><title>...
+phase2-https: HTTPS-GET OK
+```
+
+**amd64 smoke matrix post-fix** (`task efipack:smoke:amd64`):
+
+| ROW         | MODE     | SIZE       | RESULT |
+|-------------|----------|------------|--------|
+| HTTP        | original | 3 439 104  | PASS   |
+| HTTP        | packed   | 3 210 240  | PASS   |
+| HTTPS       | original | 4 931 584  | PASS   |
+| HTTPS       | packed   | 3 764 224  | PASS   |
+| OCI         | original | 5 297 152  | PASS   |
+| OCI         | packed   | 3 906 560  | PASS   |
+| EFIHANDOVER | original | 2 571 776  | PASS   |
+| EFIHANDOVER | packed   | 3 244 544  | PASS   |
+
+**8 / 8 PASS.** Files: `uefiboard/ministack/tls.go` (single
+function diff, +30 / -14). Tests:
+`go test ./uefiboard/ministack/...` — all green (no test edited;
+no test referenced the removed `resolveBudget` / `dialBudget`
+locals because they were internal to `dialTLSOnce`). Other arches
+unaffected: their `dialTLSOnce` ran the same code path and worked
+only by accident of the no-preemption schedule; the fix removes the
+fragile dependency, so all four arches now share a robust dial path.
+
+Forward note: the underlying TamaGo amd64 monotonic-clock instability
+across goroutine reschedules is a real upstream concern but is NOT
+on the `cloud-boot` critical path now that this single hotspot is
+neutralised. The pattern (`time.Now().Add(...)` paired with later
+`time.Until(...)`) is grep-clean across `uefiboard/ministack` after
+the R-amd64i fix; if a future caller adds it back, the bug will
+re-surface specifically on amd64 with rxLoop running. If we ever
+re-introduce the split-budget pattern, the safer shape is
+`deadline := time.Now().Add(timeout)` ONCE and then derive
+per-stage budgets from a single `now := time.Now()` snapshot — but
+the simpler "pass timeout straight through" pattern is what
+`HTTPGet` already does and is what this fix aligns the TLS path
+with.
 
 #### M6.2 — SHIPPED summary (PR1 + PR2 + PR3, 2026-06-09)
 
