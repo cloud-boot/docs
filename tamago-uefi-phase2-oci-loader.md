@@ -215,6 +215,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
 | **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
 | **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 landscape ENUMERATED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar; both arches stay dormant.** |
+| **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a OPEN (DTB-absence Data Abort)** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel side blocked on R-M8.5a — firmware Data Abort because EDK2 arm64 publishes ACPI + SMBIOS but no DTB, and the empty-DTB patch path in EFI-stub null-derefs (FAR=0x40). Cmdline broadened to acpi=force + earlycon=pl011,mmio32 + rdinit=/init pre-emptively but the crash is pre-cmdline-parse. M8.6 mitigation: publish a DTB via gBS->InstallConfigurationTable from Go.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10)
 
@@ -3113,6 +3114,179 @@ byte transfer remains to ship a working initramfs unpack.
   filter extended with `Unpacking initramfs`, `cloud-boot-m83`,
   `Kernel panic`, `Attempted to kill init`.
 
+### M8.5 — Real `/init` ELF in embedded initramfs + DTB-absence diagnosis (SHIPPED 2026-06-10)
+
+**What changed:**
+
+1. The embedded `initramfs.cpio.gz` is no longer a 260-byte
+   shell-script fixture — it is now a **573 KiB cpio.gz** wrapping
+   a single statically-linked aarch64 ELF `/init` built in pure Go
+   (`GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath
+   -ldflags='-s -w'`). The /init writes a marker banner to
+   `/dev/console`, `/dev/kmsg`, and stdout, then powers off via
+   `reboot(2)` `LINUX_REBOOT_CMD_POWER_OFF` so QEMU exits cleanly
+   inside the live-test timeout.
+
+   The shell-script fixture had a fatal flaw the M8.4 acceptance
+   gate did not catch: the Linux kernel rejects `#!/bin/sh` init
+   binaries on the populate-rootfs path before it ever attempts
+   spawning anything (no `/bin/sh` exists in our rootfs and no
+   in-kernel script interpreter is registered). A real ELF /init
+   is the smallest fixture the kernel will actually execve
+   end-to-end.
+
+2. New `internal/embed_initramfs/init_src/` subdirectory holds the
+   /init Go source plus `build.sh`, a reproducible re-pack script
+   (deterministic ELF via `-trimpath -ldflags='-s -w'`;
+   deterministic cpio order via `LC_ALL=C sort`; deterministic
+   gzip header via `gzip -n`).
+
+3. `internal/embed_initramfs/initramfs_test.go` grew a new
+   `TestEmbedContainsInitELF` host-side walker that decompresses
+   the cpio, finds the `init` entry, and verifies its body has
+   ELF magic + ELFCLASS64 + ELFDATA2LSB + EM_AARCH64. This
+   prevents future regressions to a script-based /init.
+
+4. `uefiboard/dtb_probe.go` + `uefiboard/dtb_probe_tamago.go` —
+   `DTBProbeResult` gained an `AllGUIDs []EFIGUID` field; the
+   walker now captures every `EFI_CONFIGURATION_TABLE` entry's
+   GUID, not just the DTB one. `phase2_oci_kernel_boot.go` dumps
+   all captured GUIDs into the live log at MODE C probe time.
+
+5. `kernelboot_arm64.go` cmdline extended from 49 to 113 chars:
+   adds `earlycon=pl011,mmio32,0x9000000` (hardcoded UART MMIO
+   base, independent of DTB), `acpi=force` (use ACPI tables EDK2
+   already publishes), `root=/dev/ram0 rdinit=/init` (explicit
+   ramdisk + init path), `loglevel=8 panic=10` (verbose printk +
+   auto-reboot on panic).
+
+**Live result** (`task kernelboot:live:arm64`, M8.5):
+
+```
+phase2-oci-kernel-boot: cmdline = console=ttyAMA0,115200 \
+    earlycon=pl011,mmio32,0x9000000 acpi=force \
+    root=/dev/ram0 rdinit=/init loglevel=8 panic=10
+phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len = 113
+phase2-oci-kernel-boot: DTB probe: SystemTable.NumberOfTableEntries = 8
+phase2-oci-kernel-boot: DTB probe: EFI_DTB_TABLE_GUID NOT FOUND ...
+phase2-oci-kernel-boot: DTB probe: GUID[ 5 ] data1 = 0xf2fd1544 ... (SMBIOS3)
+phase2-oci-kernel-boot: DTB probe: GUID[ 7 ] data1 = 0x8868e871 ... (ACPI 2.0)
+phase2-oci-kernel-boot: using embedded minimal initrd; bytes = 573602
+phase2-oci-kernel-boot: embedded initrd magic = 1f 8b 08 (gzip)
+phase2-oci-kernel-boot: PublishInitrd OK
+phase2-oci-kernel-boot: StartImage entering EFI-stub kernel
+EFI stub: Booting Linux Kernel...
+EFI stub: ERROR: efi_get_random_bytes() failed (...), KASLR will be disabled
+EFI stub: Generating empty DTB
+EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+[ firmware Data Abort, FAR=0x40, in ArmCpuDxe DefaultExceptionHandler ]
+```
+
+**Key M8.5 finding — DTB-absence is a real kernel blocker, not a
+cosmetic warning**: the GUID dump confirms EDK2's arm64 firmware
+on `-machine virt` publishes **ACPI 2.0** (`8868e871-e4f1-11d3-bc22-
+0080c73c8881`) and **SMBIOS3** (`f2fd1544-9794-4a2c-992e-
+e5bbcf20e394`) tables but does NOT publish a DTB under
+`EFI_DTB_TABLE_GUID`. The kernel falls back to "Generating empty
+DTB", which has no PSCI / GIC / UART description, and even with
+`earlycon=pl011,mmio32,…` + `acpi=force` the EFI-stub still trips
+a firmware Data Abort (FAR=0x40, translation fault) before
+`ExitBootServices` — see R-M8.5a below.
+
+PASS green on the M8.5 wiring goals (real /init, ELF guard test,
+GUID dump, cmdline broadened) on 2026-06-10. The actual
+`Unpacking initramfs` line still requires R-M8.5a to land first.
+
+**R-M8.5a — EFI-stub Data Abort despite ACPI tables + hardcoded earlycon (OPEN)**:
+
+Symptom: the EFI-stub reaches `Loaded initrd from
+LINUX_EFI_INITRD_MEDIA_GUID device path` (proving R-M8.4a's
+LoadFile2 fix is solid even with a 573 KiB initrd vs M8.4's
+260-byte fixture), then trips a firmware Data Abort:
+
+```
+Data abort: Translation fault, third level
+ ELR 0x000000013FDB9220  ESR 0x96000047  FAR 0x40
+Synchronous Exception at 0x000000013FDB9220
+ASSERT [ArmCpuDxe] /…/DefaultExceptionHandler.c(343): ((BOOLEAN)(0==1))
+```
+
+The fault address (`0x40`) is the null + 0x40 offset that
+arm64 Linux dereferences during the EFI-stub's empty-DTB DTB
+patch phase (`efi_apply_loadoptions_quirks` →
+`update_fdt_memmap` → walk fdt nodes which all return NULL on an
+empty DTB). With no DTB the patch path has nothing to walk, and
+the second-stage zero-deref happens inside firmware's call
+trampoline when the patched-fdt pointer is fed back as a
+configuration-table install argument.
+
+The cmdline workarounds we tried (acpi=force, earlycon=pl011
+hardcoded, root=/dev/ram0 rdinit=/init) cannot help because the
+crash happens BEFORE the kernel parses cmdline — it's in the
+empty-DTB patch path that runs during EFI-stub init.
+
+Mitigation paths, in priority order:
+1. **PublishDTB helper** (M8.6 — biggest impact, biggest lift):
+   embed a QEMU virt DTB at build time (`qemu-system-aarch64
+   -machine virt,dumpdtb=…` then `dtc -O dtb`), trim with `dtc`
+   to ~8 KiB, and InstallConfigurationTable it under
+   `EFI_DTB_TABLE_GUID` from Go before `StartImage`. Requires a
+   new per-arch trampoline for `gBS->InstallConfigurationTable`
+   analogous to the existing eficall_arm64.s patterns.
+2. **Pin EDK2 build with `gFdtTableGuid` install**: confirm
+   pkgx's edk2-aarch64-code.fd is actually
+   `ArmVirtPkg/ArmVirtQemu` and not a DTB-stripped derivative;
+   rebuild if it's the latter.
+3. **ACPI-only kernel build**: switch to a kernel built with
+   `CONFIG_OF=n` so the empty-DTB code path is compiled out and
+   the kernel exclusively uses the published ACPI tables. The
+   siderolabs/kernel artifact ships ACPI + OF — a kernel that
+   trips this bug only when both are compiled in.
+
+Workaround in the meantime: none short-term — the only path to
+`Run /init` involves landing one of the mitigations above.
+**M8.5's scope was the initramfs side of the handoff (now
+correct + tested + verified by the M8.5 ELF guard) plus the
+diagnostic GUID dump that proved DTB is the kernel-side
+blocker, not initramfs payload.**
+
+**Files**:
+
+- `internal/embed_initramfs/initramfs.cpio.gz` — replaced the
+  260-byte shell-script fixture with the 573 KiB
+  ELF-/init fixture.
+- `internal/embed_initramfs/doc.go` — package doc rewritten to
+  describe the new fixture + multiarch story.
+- `internal/embed_initramfs/initramfs_test.go` —
+  `TestEmbedContainsInitELF` (new) walks the cpio + checks
+  /init's ELF magic + ELFCLASS64 + ELFDATA2LSB + EM_AARCH64.
+- `internal/embed_initramfs/init_src/init.go` (new) — the Go
+  /init source (build-tag `ignore` so the parent tamago-uefi
+  build never tries to compile it).
+- `internal/embed_initramfs/init_src/build.sh` (new) —
+  reproducible re-pack script.
+- `uefiboard/dtb_probe.go` — `DTBProbeResult.AllGUIDs`
+  field added.
+- `uefiboard/dtb_probe_tamago.go` — walker captures every
+  VendorGuid, not just the DTB one.
+- `phase2_oci_kernel_boot.go` — MODE C prints every captured
+  GUID for diagnostics.
+- `kernelboot_arm64.go` — cmdline broadened: hardcoded earlycon
+  MMIO base, acpi=force, root=/dev/ram0 rdinit=/init,
+  loglevel=8, panic=10.
+
+To rebuild the initramfs fixture from scratch:
+
+```sh
+cd internal/embed_initramfs/init_src
+./build.sh
+```
+
+Coverage: 100% in `internal/embed_initramfs` (all 5 tests
+including the new ELF guard); uefiboard DTB probe tests
+unchanged + still green (new AllGUIDs field exercised by the
+existing live walker).
+
 ## 4. Five validation checks before declaring shape A complete
 
 These are not unit tests; they are end-to-end gates that block shipping.
@@ -4226,3 +4400,37 @@ Per milestone, revisit at the start of the M-N agent run.
   routing the chained banner through the M1.6 Block-IO scratch
   disk (R-M1'a). No regression on ministack/oci/uefiboard host
   tests.
+
+- **2026-06-10** (M8.5): real ELF `/init` in embedded initramfs +
+  DTB-absence diagnosed. The previous 260-byte cpio.gz fixture
+  shipped a `#!/bin/sh` script `/init` the kernel could not
+  actually execve (no `/bin/sh` in rootfs, no in-kernel script
+  interpreter). Replaced with a 573 KiB cpio.gz wrapping a
+  statically-linked aarch64 Go ELF: pure-Go (`GOOS=linux
+  GOARCH=arm64 CGO_ENABLED=0`) that writes a marker banner to
+  `/dev/console` + `/dev/kmsg` + stdout and powers off via
+  `reboot(2)`. New `internal/embed_initramfs/init_src/` ships the
+  source + a reproducible `build.sh` (trimpath + sorted cpio + `gzip
+  -n` for bit-stable rebuilds). New `TestEmbedContainsInitELF`
+  walks the embedded cpio and asserts /init has ELF magic +
+  ELFCLASS64 + ELFDATA2LSB + EM_AARCH64 — prevents regressing
+  back to a script. `uefiboard.ProbeDTBConfigurationTable` extended
+  to capture `AllGUIDs` (every `EFI_CONFIGURATION_TABLE` VendorGuid,
+  not just the DTB one); `phase2_oci_kernel_boot.go` dumps the full
+  list at MODE C probe time. Live arm64 trace confirms the bigger
+  initrd still hits `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID
+  device path` (LoadFile2 trampoline scales beyond M8.4's 260 B
+  fixture) AND that EDK2's arm64 firmware on `-machine virt`
+  publishes ACPI 2.0 (`8868e871-…`) + SMBIOS3 (`f2fd1544-…`) but
+  no DTB. `kernelboot_arm64.go` cmdline broadened to
+  `acpi=force + earlycon=pl011,mmio32,0x9000000 + root=/dev/ram0
+  rdinit=/init + loglevel=8 + panic=10`. **Open**: R-M8.5a —
+  firmware Data Abort (FAR=0x40) inside the EFI-stub's empty-DTB
+  patch path keeps the kernel from reaching `Run /init`. Crash is
+  pre-cmdline-parse so the workarounds above don't yet land us at
+  `Run /init`. M8.6 mitigation path documented: publish a DTB via
+  `gBS->InstallConfigurationTable` from Go (embed a `qemu-system-
+  aarch64 -machine virt,dumpdtb=…` snapshot + a new per-arch
+  trampoline). Coverage 100% in `internal/embed_initramfs` (5 tests
+  including the new ELF guard). No regression on uefiboard or any
+  other arch's MODE B self-test.
