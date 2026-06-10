@@ -204,8 +204,8 @@ time, from PCI device discovery up to Linux kernel handoff.
 | M6          | done 2026-06-08                     | TLS + HTTPS GET (PE>4 MiB amd64 deferred as M6.1)          |
 | M6.1        | **PARTIAL 2026-06-09**              | OVMF CpuPageTableLib root-causing + parent-side gzip embed |
 | M6.2        | **DE-RISK PASS 2026-06-09**         | hand-rolled PE32+ ≤2 MiB cleanly load+start on amd64 OVMF — `go-coff/efipack` viable |
-| M6.2 PR2    | **arm64/riscv64/loong64 GREEN 2026-06-09** (amd64 RED — R-amd64a root-caused `m6-2-edk2-upstream-investigation.md` § 11; R-amd64b AllocatePages cpuinit rewrite attempted, hit rt0 secondary regression, staged on `m6-2-pr2-amd64-wip-r-amd64b` for R-amd64c — § 12) | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
-| **M6.2**    | **SHIPPED (3/4 arches) 2026-06-09; amd64 deferred** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3) |
+| M6.2 PR2    | **ALL 4 ARCHES GREEN 2026-06-10** — R-amd64a..g saga CLOSED. amd64 unblock = R-amd64f #2 (heap via .bss reservation, skip Boot Services in cpuinit) + R-amd64g (12-line MOVQ to write runtime/goos.Bloc in cpuinit_amd64.s). Merged to main (tamago-uefi@2b2faa1 + go-coff/efipack@2e96601). See `m6-2-edk2-upstream-investigation.md` §§ 11-15 for the full chase. | per-arch self-extracting EFI stub blobs shipped in `go-coff/efipack` |
+| **M6.2**    | **SHIPPED (4/4 arches) 2026-06-10** | `pectl pack` CLI + `efipack:smoke:all` matrix + `go-coff/efipack` v0.1.0 / `go-coff/peln` v0.3.0 (M6.2 PR3). amd64 LIVE on M5+M8.0+EFIHANDOVER; OCI/HTTPS rows hit clean application-level ghcr.io network timeouts (env, not firmware/runtime). |
 | M6.2 PR4    | **SHIPPED 2026-06-09 (host-side)**  | LZFSE codec wired in `efipack v0.2.0` + `pectl v0.3.0`; runtime stubs still flate-only (deferred) |
 | M7          | done 2026-06-08                     | OCI registry client (streaming-blob deferred as M7.1)      |
 | **M7.1a**   | **done 2026-06-09 (streaming SHIPPED)** | **HTTPGetStream + HTTPSGetStream + FetchBlobStream**    |
