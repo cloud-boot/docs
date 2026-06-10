@@ -213,7 +213,7 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.0**    | **done 2026-06-09**                 | **LoadImage + StartImage chain-boot mechanism**            |
 | **M8.1**    | **SHIPPED minimal 2026-06-09**      | **OCI streaming + LoadImage + StartImage end-to-end (3/4 arches)** |
 | **M8.2**    | **framework SHIPPED 2026-06-09**    | **SetLoadOptions + PublishInitrd + MODE C wiring (dormant; live demo gated on public EFI-stub kernel OCI ref)** |
-| **M8.3**    | **per-arch matrix 2026-06-10 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..."** |
+| **M8.3**    | **per-arch matrix 2026-06-10 — userspace reach for arm64+riscv64+loong64 (see below)** | **OCI ref → vmlinuz → LoadImage → StartImage → EFI-stub prints "Booting Linux Kernel..." → kernel proper → /init userspace (3 of 4 arches; amd64 dormant pending OVMF >4 MiB sprint)** |
 | **M8.4**    | **SHIPPED arm64 + R-M8.4a CLOSED 2026-06-10; rv64+loong64 self-publish SHIPPED 2026-06-10; 24h-TTL permanence gap CLOSED 2026-06-10** | **ConfigurationTable DTB probe + PublishInitrd + per-arch LoadFile2 trampoline fixed; EFI-stub now prints `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` (4-line kernel boot trace). Expanded 60-min OCI hunt for rv64+loong64 documented in §M8.4 "Public ref landscape" — no candidate met acceptance bar. CLOSED via §M8.4 "self-publish" (2026-06-10): `cmd/cloudboot-oci-extract` extracts vmlinuz from Debian linux-image / linux-binary .deb, validates PE32+ + COFF Machine, re-packages as tar.gz `boot/vmlinuz` layer, pushes to ttl.sh anonymous-24h. Both arches now MODE C with live kernel boot (Linux 6.12.90 riscv64 + Linux 7.0.12 loong64) verified. Permanence gap closed by `.github/workflows/vmlinuz-nightly.yml` (cron 04:00 UTC, ttl.sh always-on + optional ghcr.io bearer-auth gated on `GHCR_TOKEN` secret) — see §M8.4 self-publish "Permanence gap CLOSED".** |
 | **M8.5**    | **wiring SHIPPED 2026-06-10; R-M8.5a CLOSED 2026-06-10 via M8.6** | **Embedded initramfs replaced with real static-ELF /init (573 KiB cpio.gz, pure-Go arm64) + ELF-magic guard test + DTB probe extended to dump all VendorGuids. Live trace: EFI-stub reaches `Loaded initrd…` with the real 573 KiB initrd (proves LoadFile2 fix scales beyond M8.4's 260-byte fixture). Kernel-side R-M8.5a (empty-DTB null-deref) CLOSED by M8.6 PublishDTB: EFI-stub now prints `Using DTB from configuration table` + `Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path` — old crash gone; new RngDxe-side fault (R-M8.6a, kernel-side) tracked separately below.** |
 | **M8.6**    | **SHIPPED 2026-06-10; R-M8.5a CLOSED; R-M8.6a OPEN (RngDxe Translation fault)** | **PublishDTB + InstallConfigurationTable + AllocatePool wrappers + embedded arm64-virt DTB. Live arm64 trace: `DTB published ( 7191 bytes)` → ProbeDTBConfigurationTable now sees 9 GUIDs (was 8) with `b1b621d5-...` (EFI_DTB_TABLE_GUID) at index 8 → `EFI stub: Using DTB from configuration table` → `EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path`. The empty-DTB null-deref (FAR=0x40 in EFI-stub) that blocked M8.5 is GONE. fw_cfg-via-MMIO path implemented + correct per QEMU docs/specs/fw_cfg.rst but EDK2 ArmVirtPkg doesn't map the fw_cfg window into page tables (Synchronous External Abort FAR=0x09020008) — short-circuited via per-arch fwCfgMMIOBase returning (0, false). Embedded DTB path is the M8.6 default; live MMIO walker auto-engages the day EDK2 (or our own pre-flight AddMemorySpace) makes 0x09020000 reachable.** |
@@ -225,10 +225,10 @@ time, from PCI device discovery up to Linux kernel handoff.
 
 | Arch     | Mode  | Public EFI-stub OCI ref                                                  | Live test                                                                                                     |
 |----------|-------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | PASS — EFI-stub prints "Booting Linux Kernel..." + KASLR + DTB + initrd-load attempts (see M8.3 dump below). |
+| arm64    | C     | `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`                    | **PASS — userspace reached (M8.10, 2026-06-10).** Linux 5.10.29-talos boots end-to-end: EFI-stub trace + DTB-from-config-table + initrd-load + `[ 1.395] Run /init as init process` + `cloud-boot/openweft Phase 2 Path D — /init userspace reached` + `reboot: Power down`. Wall: 17.1s. Required `-cpu cortex-a72` (`-cpu max` incompat with 5.10) + PublishDTB + UninstallAllRNG. |
 | amd64    | dormant (B) | siderolabs/kernel ships amd64 too; wiring left empty pending OVMF >4 MiB sprint on m6-2-pr2-amd64-wip. | n/a (MODE B passes; live kernel deferred).                                                                  |
-| riscv64  | C     | `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64`, see §M8.4 self-publish) | PASS — Linux 6.12.90 boots end-to-end: `EFI stub: Booting Linux Kernel...` + `Loaded initrd` + `Linux version 6.12.90+deb13.1-riscv64` + TOMOYO init + pps_core registered, panics-no-init at +0.85s as expected (stub initrd has no /init). |
-| loong64  | C     | `ttl.sh/cloudboot-vmlinuz-loong64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64`, see §M8.4 self-publish) | PASS — Linux 7.0.12 boots end-to-end: `Linux version 7.0.12+deb14-loong64` + TOMOYO init + pps_core + X.509 build-key load, panics-no-init at +0.81s as expected. |
+| riscv64  | C     | `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.11, 2026-06-10).** Linux 6.12.90 boots end-to-end: EFI-stub + initrd-load + `[ 0.903] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 18.1s. NO per-arch QEMU/cmdline tweaks needed (recent kernel auto-handles `-cpu max`; SBI earlycon; empty-DTB OK on riscv64); only change vs. M8.4 dormant was per-arch riscv64 ELF /init via `initramfs_riscv64.cpio.gz`. |
+| loong64  | C     | `ttl.sh/cloudboot-vmlinuz-loong64:24h` (cloud-boot self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64`, see §M8.4 self-publish) | **PASS — userspace reached (M8.12, 2026-06-10).** Linux 7.0.12 boots end-to-end: EFI-stub jumps straight in (loong64 EFI-stub is quieter — no `Booting Linux Kernel...` line), `[ 0.752] Run /init as init process` + Path D banner + `reboot: Power down`. Wall: 17.1s. NO per-arch QEMU/cmdline tweaks needed (recent Debian 7.0.12 + ACPI auto-discovery + ttyS0 16550); only change vs. M8.4 dormant was per-arch loong64 ELF /init via `initramfs_loong64.cpio.gz`. |
 
 ### M8.4 — Public ref landscape for riscv64 + loong64 (2026-06-10)
 
@@ -5427,3 +5427,107 @@ Per milestone, revisit at the start of the M-N agent run.
   M8.8 baseline). No regression on any other arch's MODE C live
   test. Workdir on KEEPRUN now contains `qemu.log` with the full
   ~933-line trace including userspace banner + power-down.
+
+- **2026-06-10** (M8.11 — **riscv64 end-to-end**, Phase 2 / Path D):
+  riscv64 joins arm64 at userspace reach. First run after a fresh
+  `cmd/cloudboot-oci-extract` republish to
+  `ttl.sh/cloudboot-vmlinuz-riscv64:24h` (24h-anonymous tag — the
+  nightly cron had lapsed) reached the kernel and printed
+  `[ 0.903] Run /init as init process` then immediately
+  `Kernel panic - not syncing: No working init found`. Root cause:
+  the embedded `internal/embed_initramfs/initramfs.cpio.gz` shipped
+  an aarch64 ELF /init that the riscv64 kernel cannot exec.
+
+  FIX: per-arch fan-out of the embed package. Each arch now ships
+  its own `initramfs_<arch>.cpio.gz` (built from the same `init.go`
+  source via `init_src/build.sh` which iterates over arm64+riscv64
+  +loong64), embedded by per-arch `initramfs_<arch>.go` files gated
+  by `//go:build <arch>`. The Tamago link picks the right blob via
+  the build tag; the EFI binary inlines only its own arch's
+  initramfs (no wasted ~700 KiB × 2 from sibling arches). Plus
+  `initramfs_other.go` (`!arm64 && !riscv64 && !loong64`) embeds
+  the arm64 blob as a fallback so `go test` on amd64/darwin hosts
+  still works without arch-gated tags. The init_src/init.go's
+  `utsString` helper changed from `[]int8` to a generic
+  `utsByte (int8 | uint8)` so it compiles for all three archs
+  (riscv64+loong64 Utsname uses uint8; arm64 uses int8). The
+  cpio-walking embed test now picks the expected `e_machine`
+  field per `runtime.GOARCH` (EM_AARCH64 / EM_RISCV / EM_LOONGARCH).
+
+  Live riscv64 trace post-fix:
+
+  ```text
+      EFI stub: Booting Linux Kernel...
+      EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+      EFI stub: Generating empty DTB
+      EFI stub: Exiting boot services...
+      [    0.000000] Linux version 6.12.90+deb13.1-riscv64 ...
+      [    0.000000] efi: EFI v2.7 by EDK II
+      [    0.903042] Run /init as init process
+      cloud-boot/openweft Phase 2 Path D — /init userspace reached
+      Kernel: 6.12.90+deb13.1-riscv64 riscv64
+      Total RAM: 3895 MiB
+      [    6.075] reboot: Power down
+  ```
+
+  Notable: **zero** per-arch QEMU/cmdline tweaks vs. M8.4 dormant
+  scaffolding. No `-cpu` pin (recent 6.12 kernel handles QEMU 9.x
+  `-cpu max` defaults), no PublishDTB (riscv64 boots fine on
+  empty-DTB — kernel auto-discovers via SBI + memory probe), no
+  UninstallAllRNG (EDK2 riscv64 firmware doesn't publish
+  EFI_RNG_PROTOCOL — verified via the DTB probe GUID dump, none
+  of the 9 GUIDs match `3152bca5-…`). Wall-clock: **18.1s** for
+  the full pipeline (3.4s OCI streaming + ~0.9s kernel boot +
+  5s `/init` pause + power-off).
+
+  Files: `internal/embed_initramfs/initramfs.go` (de-embed; API
+  unchanged), `initramfs_{arm64,riscv64,loong64,other}.go` (new
+  per-arch + fallback `//go:embed` files), `initramfs_<arch>.cpio.gz`
+  × 3 (new fixtures), `init_src/init.go` (generic utsString),
+  `init_src/build.sh` (loop over ARCHES), `init_src/.gitignore`
+  (per-arch artefacts), `initramfs_test.go` (per-GOARCH e_machine
+  check), `doc.go` (multiarch update), `kernelboot_riscv64.go`
+  (M8.11 doc block). 100% cov on embed_initramfs preserved (5
+  tests pass on darwin/arm64). `internal/livekernelboot/run.sh`
+  PASS gates extended: the userspace banner + power-down `grep`s
+  that arm64 had M8.10 are now universal (riscv64 + loong64 must
+  also reach `Run /init as init process` + Path D banner +
+  `reboot: Power down`); the arm64-only `DTB published` gate stays
+  arm64-gated. No regression on arm64 (re-ran post-gate-strengthen,
+  still PASS in 17.1s).
+
+- **2026-06-10** (M8.12 — **loong64 end-to-end**, Phase 2 / Path D):
+  loong64 joins arm64+riscv64 at userspace reach. Worked on the
+  first try with the M8.11 per-arch initramfs fan-out — no
+  additional fixes required beyond the loong64-specific
+  `initramfs_loong64.cpio.gz` (743440 bytes, 1.8 MiB raw
+  LoongArch64 ELF). Live loong64 trace:
+
+  ```text
+      [    0.000000] Linux version 7.0.12+deb14-loong64 ...
+      [    0.000000] efi: EFI v2.7 by EDK II
+      [    0.751654] Run /init as init process
+      cloud-boot/openweft Phase 2 Path D — /init userspace reached
+      Kernel: 7.0.12+deb14-loong64 loongarch64
+      Total RAM: 3959 MiB
+      [    5.948] reboot: Power down
+  ```
+
+  Notable: loong64's EFI-stub is quieter than arm64/riscv64 — it
+  prints zero `EFI stub:` lines and jumps straight into the kernel
+  proper. The runner's `(EFI stub: Booting Linux Kernel|Linux version )`
+  alternation already covered this case (the `Linux version` half
+  matches). Brand-new Debian 7.0.12+deb14 kernel (build date
+  2026-06-09) auto-handles QEMU 9.x `-cpu max`; ACPI 2.0 tables
+  (8868e871-... at index 9 of the firmware ConfigurationTable) give
+  the kernel hardware discovery; no EFI_RNG_PROTOCOL published
+  (verified via probe dump). Wall-clock: **17.1s**.
+
+  Files: `kernelboot_loong64.go` (M8.12 doc block; cmdline
+  unchanged). No other source changes vs. M8.11.
+
+  **M8.10/M8.11/M8.12 net result: 3 of 4 arches now reach Linux
+  userspace end-to-end from a streamed OCI vmlinuz, on QEMU+EDK2,
+  via a pure-Go pre-boot agent.** amd64 remains dormant pending
+  M6.1 (OVMF >4 MiB threshold) on the parallel `m6-2-pr2-amd64-wip`
+  branch.
