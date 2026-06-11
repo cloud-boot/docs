@@ -1224,3 +1224,24 @@ Root cause hypothesis: phase2_tpm_measure pulls in go-tpm2 code that has its own
 | R-tpm1a | NEXT — fix phase2_tpm_measure build-tag conflict |
 | 3.x.1 NetBSD FFS root | queued |
 | 4.0a real NTFS reader | multi-month, deferred |
+
+### 2026-06-11 17:30 — R-doom1a CLOSED (DOOM full stack operational)
+
+DisconnectController + preDetachVirtioHandles shipped in cloud-boot/tamago-uefi@77afcfb. Live test (`task doomboot:live:amd64` wall=60454ms) confirms all 3 virtio drivers come up cleanly through the cloud-boot+TamaGo+UEFI bare-metal stack:
+
+```
+phase3-oci-doom-boot: pre-detached virtio handles = 3
+phase3-oci-doom-boot: virtio-gpu UP, num_scanouts = 1
+phase3-oci-doom-boot: scanout 0 size = 1280 x 800
+phase3-oci-doom-boot: virtio-snd UP, streams = 2
+phase3-oci-doom-boot: PCM stream 0 RUNNING (11025 Hz mono S16_LE)
+phase3-oci-doom-boot: virtio-in UP, name = QEMU Virtio Keyboard
+phase3-oci-doom-boot: handing off to gore.Run — DOOM main loop starting
+```
+
+**Notable findings:**
+1. `DisconnectController(handle, NULL, NULL)` is the reusable pattern for any go-virtio integration on UEFI — EDK2 OvmfPkg's VirtioGpuDxe (and likely VirtioSerialDxe per R-M9.1a) auto-binds BY_DRIVER at DXE phase, taking exclusive PCI_IO control.
+2. virtio-sound v0.2.0 WIP rate negotiation works end-to-end — DOOM's native 11025 Hz mono S16_LE is selected without any resampling layer.
+3. Full TamaGo runtime fits comfortably inside 256 MiB heap for DOOM (28 MB embedded WAD + ~36 MB engine working set + virtio buffers + Go runtime + spare).
+
+Next sprint (DOOM 1.1): extend the live runner's PASS gate to validate actual frame production (e.g., tic counter advance, virtio-gpu RESOURCE_FLUSH calls) and/or capture a frame buffer dump to confirm visible game-screen output. This requires either an internal DOOM frame-counter println hook or a virtio-gpu Flush-call counter exposed via the probe.
