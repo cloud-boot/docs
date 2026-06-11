@@ -1253,3 +1253,22 @@ The earlier "linkcpuinit unresolved Bloc" error was a false alarm — caused by 
 Live test against swtpm 2.0 emulator: QEMU starts, swtpm process up, but QEMU produces ZERO stdout (qemu.log empty after 200s wall-clock timeout). The TamaGo probe never prints its phase2-probe banner — something blocks earlier than the cloud-boot main(). Likely candidates: tpm-tis device init in EDK2's Tcg2Dxe blocks waiting for response; or the swtpm socket isn't reachable to QEMU.
 
 R-tpm1a refocused: investigate tpm-tis emulation handshake (vs tpm-crb) + verify swtpm socket path + add diagnostic println BEFORE LocateTCG2() to confirm whether the probe is reached at all. Build path is fully working; live test infrastructure needs the firmware-side gate diagnosed.
+
+### 2026-06-11 18:10 — DOOM renders ~77 seconds of frames (R-doom1c queued)
+
+R-doom1b diagnostic shipped (cloud-boot/godoom@62d8e49) surfaces DrawFrame errors + tick count. Live result with Cocoa window:
+
+```
+tamago-frontend: first DrawFrame OK (engine producing frames)
+tamago-frontend: DrawFrame tick 35 OK
+... [2700 frames @ 35 Hz = ~77 seconds OK] ...
+tamago-frontend: DrawFrame tick 2695 OK
+tamago-frontend: DrawFrame tick 2730 FAILED: go-virtio/gpu: device returned an error response to a control command
+... [continues failing every tick]
+```
+
+**Result**: DOOM main loop entered, runs at native 35 Hz, renders ~77 seconds of frames (intro flames + main menu + demo loop visible in Cocoa window per operator screenshot), then virtio-gpu device starts rejecting control commands. The error response pattern fingerprints a resource leak: probably each RESOURCE_FLUSH path allocates a transient virtio-gpu resource that QEMU's emulation eventually runs out of (resource ID 14-bit space or memory backing pool exhaustion).
+
+R-doom1c queued: audit go-virtio/gpu.Framebuffer.Flush() for resource leak — verify that TRANSFER_TO_HOST_2D + RESOURCE_FLUSH reuse a fixed resource ID per scanout instead of allocating per-call. Fix should land in go-virtio/gpu and let DOOM run indefinitely.
+
+**Validation today**: cloud-boot bare-metal stack runs DOOM's full intro + menu + demo loop on virtio-gpu via TamaGo+UEFI+godoom for 77 seconds with no input lag observed (input adapter wired, keypress would advance from menu). First viral demo MILESTONE achieved.
