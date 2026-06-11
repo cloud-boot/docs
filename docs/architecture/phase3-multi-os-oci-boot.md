@@ -1185,3 +1185,42 @@ what this document already records.
 - MdeModulePkg/Universal/Disk/PartitionDxe/Partition.c (`PartitionInstallChildHandle`, `DriverBindingSupported`)
 - FreeBSD 14.3-RELEASE amd64 bootonly ISO layout (verified 2026-06-11)
 - mfsBSD-mini-14.0-RELEASE-amd64.img layout (rejected for ESP-only use; BIOS-boot only)
+
+---
+
+## 2026-06-11 — Live test session results
+
+**Sprint 2E heap 320 MiB live verify**: PASS. `task freebsdboot:live:amd64` wall=240418ms. Pipeline streams 68 MB image without OOM (vs. previous 251 MiB cap that blocked even the SYN). All gates reached: PublishBlockIO + ConnectController + PublishSFS (UFS-backed handle 0x51776098) + LoadImage(loader.efi) + loader.efi runs + countdown + exits EFI_NOT_FOUND (= incomplete bootroot.tar fixture; sprint 2F = ship full FreeBSD root). The 320 MiB sweet spot identified empirically: 256 MiB OOMs streaming, 384 MiB BSS exceeds firmware AllocatePages capacity, 320 MiB threads the needle.
+
+**DOOM probe live verify (R-doom1)**: Substantial progress on first try, blocked at virtio-gpu open.
+```
+phase3-oci-doom-boot: WAD embedded, size = 28795076 bytes (Freedoom1)
+phase3-oci-doom-boot: scanned 9 PCI handles
+phase3-oci-doom-boot: virtio-gpu @ handle 2120278808
+phase3-oci-doom-boot: virtio-snd @ handle 2120279192
+phase3-oci-doom-boot: virtio-in  @ handle 2120277016
+phase3-oci-doom-boot: opening virtio-gpu…   ← blocks here
+```
+Root cause hypothesis: EDK2 OvmfPkg's `VirtioGpuDxe` binds BY_DRIVER on virtio-gpu PCI handles at DXE phase, taking exclusive control. Our `gpu.OpenVirtioGPU(t)` call via UEFITransport then OpenProtocol(PCI_IO) blocks waiting for the firmware driver to release. Same pattern as R-M9.1a virtio-console finding.
+
+Fix queued (R-doom1a): add `uefiboard.DisconnectController(handle)` helper (gBS->DisconnectController @ offset 272) + call it on the virtio-gpu handle before opening. Mirror for virtio-snd + virtio-input where firmware drivers may also bind.
+
+**TPM measured-boot live (R-tpm1)**: BUILD fails when phase2_tpm_measure tag is set:
+```
+cpuinit: relocation target runtime/goos.Bloc not defined
+cpuinit: relocation target runtime/goos.RamStackOffset not defined
+cpuinit: relocation target _rt0_tamago_start not defined
+```
+Root cause hypothesis: phase2_tpm_measure pulls in go-tpm2 code that has its own `init()` referencing runtime symbols not exposed by TamaGo's linkcpuinit minimal symbol set. Fix queued (R-tpm1a): audit `phase2_tpm_measure.go` + `tcg2_protocol_tamago.go` import chain for runtime-dependent symbols; either gate the offending dep behind a separate runtime-bypass tag or add the missing symbol stubs to cpuinit_amd64.s.
+
+## Roadmap snapshot (2026-06-11)
+
+| Sprint | Status |
+|---|---|
+| 2E heap 320 MiB | DONE — FreeBSD streaming OOM fixed |
+| 2F | NEXT — complete FreeBSD bootroot so loader finds kernel |
+| Multi-arch port (block_io+sfs PC helpers riscv64+loong64) | WIP |
+| R-doom1a | NEXT — DisconnectController + retest virtio-gpu open |
+| R-tpm1a | NEXT — fix phase2_tpm_measure build-tag conflict |
+| 3.x.1 NetBSD FFS root | queued |
+| 4.0a real NTFS reader | multi-month, deferred |
