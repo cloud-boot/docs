@@ -1,6 +1,6 @@
 # Phase 3 — OS-agnostic OCI boot
 
-**Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.3 closed 2026-06-11 (defensive FP saves on arm64/riscv64/loong64 RNG trampolines); sprint 2 (UFS) DONE; sprint 3 (NetBSD/OpenBSD) DONE; sprint 4 (Windows scaffolding) DONE.
+**Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.3 closed 2026-06-11 (defensive FP saves on arm64/riscv64/loong64 RNG trampolines); sprint 2 (UFS) DONE; sprint 3 (NetBSD/OpenBSD) DONE — sprint 3.x closed 2026-06-11 (NetBSD live boot PASS via 307 MiB installer boot.iso, `NetBSD/x86 EFI Boot (x64)` banner + `boot:` prompt reached); sprint 4 (Windows scaffolding) DONE.
 **Owner:** cloud-boot/tamago-uefi
 **Companion repos:** [`go-virtio`](../../../../go-virtio), [`go-filesystems`](../../../../go-filesystems)
 
@@ -883,7 +883,7 @@ either OS at the read-only-kernel-load level. UFS1 fallback is sprint
 
 | Runner | Source-image expectation | Push helper |
 |--------|--------------------------|-------------|
-| `internal/livenetbsdboot/run.sh` | `NetBSD-X.Y-amd64.iso` (xorriso extracts `\EFI\BOOT\BOOTX64.EFI`). Defaults: `~/Downloads/NetBSD-10.0-amd64.iso`, `/tmp/netbsd/...`. Env: `CLOUDBOOT_NETBSD_IMAGE`. |  Reuses `internal/livefreebsdboot/pushfreebsd` — the OCI artifact mediaType is content-agnostic. |
+| `internal/livenetbsdboot/run.sh` | Preferred: `installation/cdrom/boot.iso` (~307 MiB, xorriso extracts `/usr/mdec/bootx64.efi`). Also accepts: full `NetBSD-X.Y-amd64.iso` (xorriso extracts `\EFI\BOOT\BOOTX64.EFI`). Defaults: `~/Downloads/NetBSD-10.0-amd64-boot.iso`, `~/Downloads/NetBSD-10.0-amd64.iso`, `/tmp/netbsd/...`. Auto-downloads boot.iso from `cdn.netbsd.org` when no cached image is present. Env: `CLOUDBOOT_NETBSD_IMAGE`, `CLOUDBOOT_NETBSD_IMAGE_URL`. |  Reuses `internal/livefreebsdboot/pushfreebsd` — the OCI artifact mediaType is content-agnostic. |
 | `internal/liveopenbsdboot/run.sh` | `installXX.iso` (xorriso) OR `miniroot76.img` (mtools `mcopy -i $img@@1M` on the embedded ESP). Defaults: `~/Downloads/install7{6,5,4}.iso`, `/tmp/openbsd/install76.iso`. Env: `CLOUDBOOT_OPENBSD_IMAGE`. | Reuses `pushfreebsd`. |
 
 Both runners assert the same gate set as `freebsdboot` sprint 1.1
@@ -928,22 +928,68 @@ trigger here because the OpenBSD ESP-only disk image is 16 MiB
 (vs. FreeBSD's 412 MiB bootonly ISO). At 16 MiB the streaming working
 set fits comfortably under tamago's 256 MiB heap.
 
-**NetBSD:** Live test not attempted in sprint 3 budget — full
-NetBSD-10.0-amd64.iso is 622 MiB, the 330 MiB uefi-install.img.gz
-download exceeded the 60s window allocated for ISO acquisition. The
-scaffolding is structurally identical to OpenBSD's (proven path) and
-the probe + EFI build are both green:
+**NetBSD:** Live test PASS — sprint 3.x closed 2026-06-11.
+
+Sprint 3 left the NetBSD live boot gated on ISO acquisition: the full
+`NetBSD-10.0-amd64.iso` (622 MiB) and the `uefi-install.img.gz` (330 MiB
+compressed → ~512 MiB raw) both exceeded the download window allocated
+for runner setup. Sprint 3.x surveyed the NetBSD-10.0 amd64 download
+tree for a smaller bootable image carrying the EFI loader, and selected
+the **installer boot.iso** (~307 MiB):
+
+| Image                                                                  | Size      | EFI loader path             |
+|------------------------------------------------------------------------|-----------|------------------------------|
+| `NetBSD-10.0-amd64.iso`                                                | 622 MiB   | `/EFI/BOOT/BOOTX64.EFI`     |
+| `NetBSD-10.0-amd64-uefi-install.img.gz` (uncompresses to ~512 MiB raw) | 330 MiB   | `/EFI/BOOT/BOOTX64.EFI`     |
+| `NetBSD-10.0-amd64-live.img.gz`                                        | 436 MiB   | (live image, multi-GiB raw)  |
+| **`amd64/installation/cdrom/boot.iso`**                                | **307 MiB** | **`/usr/mdec/bootx64.efi`** (236 KiB PE32+) |
+
+The installer `boot.iso` is half the size of the full ISO and ships the
+amd64 EFI loader at `/usr/mdec/bootx64.efi` (sourced from the El-Torito
+EFI boot image; the canonical `/EFI/BOOT/BOOTX64.EFI` is not surfaced
+as a regular file in the ISO9660 tree). `internal/livenetbsdboot/run.sh`
+now (a) defaults to `NetBSD-10.0-amd64-boot.iso` cached under
+`~/Downloads/` or `/tmp/netbsd/`, (b) auto-downloads it from
+`https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/installation/cdrom/boot.iso`
+when no cached image is found, and (c) probes both `/EFI/BOOT/BOOTX64.EFI`
+and `/usr/mdec/bootx64.efi` on extraction.
+
+Live run output (sprint 3.x, 2026-06-11):
 
 ```
-$ task netbsdboot:efi:amd64
-task: [netbsdboot:elf:amd64] ... go build ... -o app_amd64_netbsdboot.elf .
-task: [netbsdboot:efi:amd64] ... link-pie -o BOOTX64-NETBSDBOOT.EFI app_amd64_netbsdboot.elf
-$ ls BOOTX64-NETBSDBOOT.EFI
--rw-r--r-- 5424640 BOOTX64-NETBSDBOOT.EFI
+$ task netbsdboot:live:amd64
+[live-netbsdboot:amd64] NetBSD source image: /tmp/netbsd/NetBSD-10.0-amd64-boot.iso (321794048 bytes)
+[live-netbsdboot:amd64] extracting bootx64.efi from /tmp/netbsd/NetBSD-10.0-amd64-boot.iso
+[live-netbsdboot:amd64] bootx64.efi: 236276 bytes
+[live-netbsdboot:amd64] building 16 MiB FAT16 ESP
+[live-netbsdboot:amd64] wrapping FAT in PMBR + GPT via buildespimg
+[live-netbsdboot:amd64] publishing /tmp/.../disk.img to ttl.sh/cloudboot-netbsd-<rand>:24h
+[live-netbsdboot:amd64] launching qemu-system-x86_64 (timeout 180s)
+...
+phase3-oci-netbsd-boot: streamed 16826880 bytes; SHA-256 verified OK
+phase3-oci-netbsd-boot: PublishBlockIO OK
+phase3-oci-netbsd-boot: ConnectController OK
+phase3-oci-netbsd-boot: LocateHandleBuffer(SFS) found 2 total handle(s)
+phase3-oci-netbsd-boot: LoadImage( \EFI\BOOT\BOOTX64.EFI ) OK
+phase3-oci-netbsd-boot: NETBSD-BOOT CHAIN COMPLETE -- transferring control to bootx64.efi
+   \\        __,---`  NetBSD/x86 EFI Boot (x64)
+booting NAME=EFI System:netbsd - starting in 10 seconds. 9 seconds. ...
+boot: NAME=EFI System:netbsd: No such file or directory
+booting NAME=EFI System:netbsd.gz (howto 0x20000)
+boot: NAME=EFI System:netbsd.gz: No such file or directory
+...
+[live-netbsdboot:amd64] PASS — wall=180177ms, ref=ttl.sh/cloudboot-netbsd-<rand>:24h
 ```
 
-When a NetBSD ISO is available locally, `CLOUDBOOT_NETBSD_IMAGE=...
-task netbsdboot:live:amd64` runs the same proven shape against it.
+PASS gate met (all 9 chain checkpoints) AND the informational stretch
+target also reached: the **NetBSD/x86 EFI Boot (x64) banner + `boot:`
+prompt** are visible in the QEMU log. The loader's `No such file or
+directory` retries on `netbsd` / `netbsd.gz` / `onetbsd` / `netbsd.old`
+are expected — sprint 3 publishes a FAT-only ESP image (no NetBSD FFS
+root, no `/netbsd` kernel); reaching that state is precisely the sprint
+3.x architectural goal (analogue of OpenBSD's `boot>` prompt result).
+Real kernel boot remains queued under sprint 3.1 (UFS/FFS root via
+`buildespimg -ufs`).
 
 ### Sprint 3.x follow-ups (queued)
 
@@ -1111,7 +1157,7 @@ what this document already records.
 | 2E     | post-loader: kernel banner + `mountroot>`  | heap bump 256 MiB→384 MiB OR TLS/cosign working-set audit; expected handoff is `Loading /boot/kernel/kernel` then `FreeBSD/amd64 (...) #0` |
 | 2F     | mfsroot or rootfs hint so kernel reaches single-user | synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf |
 | 2G     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
-| 3      | NetBSD / OpenBSD scaffolding + MVP        | **DONE 2026-06-11** — both probes ship (FFSv2 default on both modern releases, no UFS driver gap); OpenBSD live boot PASS end-to-end to `boot>` prompt; NetBSD live test gated on a local ISO only (same proven shape). |
+| 3      | NetBSD / OpenBSD scaffolding + MVP        | **DONE 2026-06-11** — both probes ship (FFSv2 default on both modern releases, no UFS driver gap); OpenBSD live boot PASS end-to-end to `boot>` prompt; NetBSD live boot PASS to `NetBSD/x86 EFI Boot (x64)` banner + `boot:` prompt (sprint 3.x, 307 MiB `installation/cdrom/boot.iso`, `/usr/mdec/bootx64.efi` extracted). |
 | 3.1    | NetBSD/OpenBSD UFS-root via `buildespimg -ufs` | analogue of FreeBSD sprint 2C-Integration |
 | 3.2    | NetBSD/OpenBSD single-user kernel boot     | analogue of sprints 2E/2F (heap audit + mfs root) |
 | 3.5    | UFS1 read in `go-filesystems/ufs`          | conditional — only if a target cloud image still ships pre-FFSv2 |
