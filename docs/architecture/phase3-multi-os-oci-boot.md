@@ -645,9 +645,88 @@ sits in the tamago-uefi runtime, not in the UFS driver scope of 2D.
   extension — the writer correctly produces a 29 MiB-kernel-bearing
   partition and the read-side verifier confirms it.
 
+## Sprint 2D'' CLOSED — `FetchBlobToBuffer`: zero-transient OCI streaming (2026-06-11)
+
+Sprint 2D' eliminated `PublishBlockIO`'s redundant copy (saved one 64 MiB
+transient by referencing the caller-owned slice via the typed
+`bodyKeepAlive` field). OOM persisted at the same `~251 MiB in use`
+mark during streaming, so the next architectural lift was to remove
+the OCI-side `bytes.Buffer` transient and write the image directly
+into a pre-allocated `[]byte`.
+
+**Refactor** (`uefiboard/ministack/oci/fetch.go`):
+
+New method `(*Registry).FetchBlobToBuffer(desc Descriptor, dst []byte)
+(int64, error)`. Backs the streaming sink with a no-alloc
+`fixedSliceWriter` (an `io.Writer` that fills `dst[off:]` at a
+running cursor; surfaces `ErrBlobBufferOverflow` if the registry
+delivers more bytes than `dst` can hold; surfaces
+`ErrBlobBufferTooSmall` up-front if `len(dst) < desc.Size`). The
+chunk SHA-256 + redirect chain + size/digest verification mirror
+`FetchBlobStream` exactly — only the sink changes.
+
+**Wire-in** (`phase2_oci_freebsd_boot.go`):
+
+```go
+// before (Sprint 2D'):
+var buf bytes.Buffer
+buf.Grow(int(target.Size))
+n, ferr := reg.FetchBlobStream(target, &buf)
+imageBytes := buf.Bytes()
+// + post-stream pad-append that may realloc
+
+// after (Sprint 2D''):
+tailPad := 0
+if rem := int(target.Size) % 512; rem != 0 {
+    tailPad = 512 - rem
+}
+imageBytes := make([]byte, int(target.Size)+tailPad)
+n, ferr := reg.FetchBlobToBuffer(target, imageBytes[:int(target.Size)])
+```
+
+One `make([]byte, ...)` for the lifetime of the image. No
+`bytes.Buffer`. No `buf.Bytes()` alias. No tail-pad reallocation
+(the 512-byte LBA padding is included in the initial allocation;
+`make` zero-fills, which is what UEFI expects). The same slice is
+handed to `PublishBlockIO`, which references it via R-amd64j Phase 1
+`bodyKeepAlive`.
+
+**Test coverage**: new `fetch_buffer_test.go` mirrors the
+`fetch_stream_test.go` matrix (happy, digest mismatch, size mismatch,
+redirect, redirect-no-location, non-200, transport error, bad
+descriptor, not-streaming, too-many-redirects) plus
+slice-sink-specific paths (buffer-too-small, body-overflow, oversize
+slice, direct `fixedSliceWriter` unit tests). Package coverage:
+96.4%; `FetchBlobToBuffer` at 97.2% (matches `FetchBlobStream`).
+
+### Sprint 2D'' PASS gate
+
+- **Architectural goal (`bytes.Buffer` transient elimination)**:
+  PASS — one slice allocation for the disk image lifetime;
+  `imageBytes` is the SAME slice from `make` to `PublishBlockIO` to
+  `bodyKeepAlive`.
+- **Unit tests**: PASS — 13 new tests, package coverage held at 96.4%.
+- **Build (`freebsdboot:elf:amd64`)**: PASS clean.
+- **Live (`freebsdboot:live:amd64`)**: STILL OOM at the same
+  `251428864 in use` mark, panic point now inside `FetchBlobToBuffer`
+  (was `FetchBlobStream`) — confirming the transient was NOT the
+  dominant working-set contributor. The actual 251 MiB peak is
+  `65 MiB image slice + ~176 MiB TLS record + cosign cert chain
+  ASN.1 + HTTP chunked decode state`, with the next 4 MiB allocation
+  pushing past the 256 MiB heap ceiling.
+
+**Conclusion**: the architectural transient-elimination work is
+complete and correct. The remaining OOM is a working-set / heap-size
+question, not an image-pipeline question — it sits in Sprint 2D'''
+(heap bump) or Sprint 2E (TLS/cosign working-set audit).
+
 ### Sprint 2E scope (queued)
 
-- Resolve the tamago streaming-OOM blocker (refactor or heap bump).
+- Resolve the residual streaming-OOM either by bumping
+  `board_amd64.go::heapReserveSize` 256 MiB → 384 MiB (the original
+  Sprint 2D' Option B, which 2D'' deliberately deferred to keep the
+  fix architectural rather than a knob-twist), or by auditing the
+  TLS / cosign / chunked-decode working set for further reductions.
 - Then re-run live test for the kernel-handoff trace: expect
   `Loading /boot/kernel/kernel` → `FreeBSD/amd64 (...) #0` banner →
   `mountroot>` prompt (since we have no rootfs beyond `/boot/`, the
@@ -668,8 +747,9 @@ sits in the tamago-uefi runtime, not in the UFS driver scope of 2D.
 | 2C-C   | fresh UFS2 oracle via kusumi-makefs        | DONE — gold cross-check for 2C-A writer |
 | 2C-Int | wire 2C-A + 2C-B into live boot via `buildespimg -ufs` | **DONE** — 2-partition GPT, PublishSFS OK, loader.efi reads UFS @ disk1p2 |
 | 2D     | `MkfsWith(BlockSize=32768)` + double-indirect → 29 MiB kernel lands in UFS | **DONE (offline)** — pure-Go writer ships kernel; verified via pinned 2C-B reader. Live runner blocked on tamago streaming OOM — sprint 2D' |
-| 2D'    | tamago heap / OCI streaming refactor (single live copy or `heapReserveSize` bump) | refactor `phase2_oci_freebsd_boot.go` stream path; or raise `board_amd64.go::heapReserveSize` 256 MiB → 384 MiB |
-| 2E     | post-loader: kernel banner + `mountroot>`  | sprint 2D' unblocks; expected handoff is `Loading /boot/kernel/kernel` then `FreeBSD/amd64 (...) #0` |
+| 2D'    | eliminate `PublishBlockIO` redundant copy via `bodyKeepAlive` | **DONE** — caller-owned slice referenced directly; one 64 MiB transient saved. OOM persisted. |
+| 2D''   | eliminate `bytes.Buffer` transient on the OCI streaming sink | **DONE (architectural)** — `oci.FetchBlobToBuffer` + pre-padded slice. Single allocation for the image lifetime. Live runner still OOMs because the 251 MiB peak is TLS+cosign+HTTP state, not the image-pipeline transient — Sprint 2E. |
+| 2E     | post-loader: kernel banner + `mountroot>`  | heap bump 256 MiB→384 MiB OR TLS/cosign working-set audit; expected handoff is `Loading /boot/kernel/kernel` then `FreeBSD/amd64 (...) #0` |
 | 2F     | mfsroot or rootfs hint so kernel reaches single-user | synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf |
 | 2G     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
 | 3      | NetBSD / OpenBSD                          | FFS family in go-filesystems; loader names differ |
