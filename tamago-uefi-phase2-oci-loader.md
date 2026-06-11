@@ -220,6 +220,8 @@ time, from PCI device discovery up to Linux kernel handoff.
 | **M8.7**    | **SHIPPED 2026-06-10; R-M8.6a CLOSED** | **Dual-path RngDxe fix: (A) cmdline adds `nokaslr random.trust_bootloader=0 random.trust_cpu=0` so kernel skips EFI RNG entirely; (B) `uefiboard.PublishRNG` + per-arch trampolines (rng_protocol_<arch>.s × 4) install `EFI_RNG_PROTOCOL` handle for future builds that re-enable KASLR. Live arm64 trace: `KASLR disabled on kernel command line` instead of `efi_get_random_bytes() failed` — no RngDxe Data Abort, EFI-stub completes its 4-line trace cleanly, control transfers to kernel proper (post-EBS output routes via pl011 serial; M8.8 will wire the routing). |
 | **M8.8**    | **SHIPPED 2026-06-10; cmdline routing fixed; R-M8.8a OPEN (new pre-EBS Data Abort, kernel-side)** | **Post-EBS serial routing cmdline cleanup: drop `acpi=force` (M8.6 now publishes a proper QEMU-virt DTB with pl011@9000000 + serial0 alias + chosen/stdout-path; with both `acpi=force` AND a DTB present the kernel was picking ACPI which has no UART description); add `keep_bootcon` so earlycon stays alive until ttyAMA0 is fully registered; add `earlyprintk=keep` for symmetry; add `printk.time=y` for `[ x.xxx]` timestamp prefix. QEMU `-serial stdio` confirmed routing PL011 correctly via clean EFI-stub trace. Live test with `M81_LIVE_KEEPRUN=1` uncovered a NEW pre-ExitBootServices Data Abort (R-M8.8a): `Synchronous Exception at 0x000000013C0FF9DC, ESR 0x96000047, FAR 0x40` (Translation fault, third level, null+0x40 deref) caught by EDK2's `ArmCpuDxe` DefaultExceptionHandler — proving boot services were still active when the fault fired. M8.7 PublishRNG already neutralised the firmware RngDxe handle; this is a DIFFERENT firmware-side null-deref on the kernel→firmware path. Cmdline cleanup is correct on its own merits and will let post-EBS output flow the moment R-M8.8a is unblocked in M8.9. |
 | M8.9        | next                                | **R-M8.8a: pre-EBS Data Abort in EDK2 DXE region** (suspected: efi_random_alloc indirect, efi_get_memory_map walk over partially-uninstalled handle, or a runtime services install path) |
+| **M8.15**   | **SHIPPED 2026-06-11**              | **All 4 arches unified onto the cmdline-driven `initrd=<path>` ESP loader via `uefiboard.InheritParentDeviceHandle` (M8.14's amd64-only espfile mode generalised). EDK2's DXE Core + FatDxe surface SimpleFileSystem on the parent ESP DeviceHandle identically across ArmVirtPkg/RiscVVirtPkg/LoongArchVirtPkg/OvmfPkg — verified empirically by live boot on all 4 arches.** |
+| **M8.16**   | **SHIPPED 2026-06-11**              | **Delete the now-dead LoadFile2 publish path: `PublishInitrd` / `UnpublishInitrd` Go API + per-arch asm trampolines (`uefiboard/initrd_protocol_<arch>.s` × 4) + registry + nosplit trace helper + tests. ~1684 LOC removed across 10 files; shared GUID + device-path constants (`LinuxEFIInitrdMediaGUID`, `EFIDevicePathProtocolGUID`, `devPathType*/SubType*`, `efiBSInstallMultipleProtocolInterfaces`/`efiBSUninstall…`) preserved in `uefiboard/device_path.go` (still consumed by `block_io_publish_tamago.go` + `sfs_filter_tamago.go` + `dtb_probe_test.go`). Call sites in `phase2_oci_kernel_boot.go` (OCI-streaming + embedded-cpio.gz initrd-publish branches + `fetchInitrdFromOCI` + cleanup-side `UnpublishInitrd`) and `phase2_dhcp_oci_menu.go` (PublishInitrd branch + `fetchInitrdFromOCIMenu`) reduced to the espfile-only single-branch + `InheritParentDeviceHandle`. Non-regression: all 4 `task kernelboot:live:<arch>` continue to PASS — userspace reached end-to-end on arm64/amd64/riscv64/loong64, M8.13/M8.14 wall-clocks unchanged.** |
 
 ### M8.3 — per-arch live kernel boot matrix (2026-06-10; M8.13 unification update)
 
@@ -5924,3 +5926,90 @@ Per milestone, revisit at the start of the M-N agent run.
   reach Linux userspace end-to-end live (arm64/riscv64/loong64);
   amd64 is wire-ready and will activate the moment its firmware-
   size blocker closes.**
+
+- **2026-06-11** (M8.16 — **delete LoadFile2 publish path**, Phase 2 /
+  Path D cleanup): excise ~1684 LOC of dead code now that M8.15 has
+  unified all 4 arches onto the cmdline-driven `initrd=<path>` ESP
+  loader (`uefiboard.InheritParentDeviceHandle`). The
+  LoadFile2 / `LINUX_EFI_INITRD_MEDIA_GUID` publish path
+  (`PublishInitrd`/`UnpublishInitrd` Go API + per-arch asm trampolines
+  + registry + nosplit ConOut tracer + host tests) is unreached at
+  runtime on every arch and is removed entirely.
+
+  **Files deleted (10):**
+
+  - `uefiboard/initrd_protocol.go` (loadFileGo + registry + sentinels)
+  - `uefiboard/initrd_protocol_tamago.go` (PublishInitrd +
+    InstallMultipleProtocolInterfaces wiring)
+  - `uefiboard/initrd_protocol_host.go` (host stubs)
+  - `uefiboard/initrd_protocol_test.go` (host unit tests)
+  - `uefiboard/initrd_protocol_trace_tamago.go` (R-M8.4a nosplit
+    ConOut tracer)
+  - `uefiboard/initrd_protocol_trace_host.go` (host stub)
+  - `uefiboard/initrd_protocol_amd64.s` (per-arch asm trampoline)
+  - `uefiboard/initrd_protocol_arm64.s`
+  - `uefiboard/initrd_protocol_riscv64.s`
+  - `uefiboard/initrd_protocol_loong64.s`
+
+  **File added (1):** `uefiboard/device_path.go` (~100 LOC) preserves
+  the shared GUIDs + device-path constants that survived because
+  `block_io_publish_tamago.go`, `sfs_filter_tamago.go`, and
+  `dtb_probe_test.go` still need them. Nothing LoadFile2-specific
+  survives.
+
+  **Call sites updated:**
+
+  - `phase2_oci_kernel_boot.go` — the MODE C dispatcher's
+    OCI-streaming and embedded-cpio.gz initrd-PUBLISH branches +
+    cleanup-side `UnpublishInitrd` + `fetchInitrdFromOCI` helper +
+    `errInitrdNoLayers` / `errInitrdLayerTooBig` sentinels are all
+    gone. Switch collapses to a single banner line
+    (`kernelBootInitrdMode == "espfile"` is true on every per-arch
+    file). Dropped now-unused import `net`. The
+    `internal/embed_initramfs` import is INTENTIONALLY KEPT alive via
+    `keepEmbedInitramfsAlive = len(embed_initramfs.Bytes())` — see
+    R-M8.16a below.
+  - `phase2_dhcp_oci_menu.go` — `PublishInitrd`/`UnpublishInitrd`
+    branches removed; replaced by `InheritParentDeviceHandle` (mirror
+    of `phase2_oci_kernel_boot`). `fetchInitrdFromOCIMenu` +
+    `errInitrdNoLayersMenu` / `errInitrdLayerTooBigMenu` deleted.
+
+  **Non-regression verified** (M8.15 had already proven the runtime
+  shape was correct; M8.16 is a pure deletion):
+
+  - `task kernelboot:live:arm64` — PASS, `/init` userspace reached,
+    wall ~17s (unchanged).
+  - `task kernelboot:live:amd64` — PASS, wall ~16s (unchanged from
+    M8.14).
+  - `task kernelboot:live:riscv64` — PASS, wall ~18s (unchanged).
+  - `task kernelboot:live:loong64` — PASS, wall ~17s (unchanged).
+  - `task efipack:smoke:amd64` — PASS (broader pipeline non-regression).
+  - `go test ./uefiboard/...` host suite — all green.
+
+  **M8.16 net result: ~1684 LOC deleted, ~100 LOC added (device_path
+  rescue file), zero runtime-behaviour change. The package no longer
+  exports a `PublishInitrd` / `UnpublishInitrd` API; consumers must
+  use `InheritParentDeviceHandle` + ESP-staged initrd. The doc-block
+  in `phase2_oci_kernel_boot.go`'s file header now explicitly states
+  the LoadFile2 path is gone.**
+
+  **R-M8.16a — keep `embed_initramfs` linked even though it is
+  no longer called.** Dropping the `internal/embed_initramfs` import
+  outright shrinks the riscv64 binary by ~712 KiB (the per-arch
+  embedded cpio.gz blob), which shifts the EFI LoadImage memory map
+  allocations downstream and empirically pushes the kernel-side
+  initrd address into a region the Linux EFI memmap walker marks
+  "INITRD overlaps in-use memory region" → `disabling initrd` →
+  `VFS: Cannot open root device "/dev/ram0"` panic. Pre-M8.15 traces
+  on the SAME vmlinuz `ttl.sh/cloudboot-vmlinuz-riscv64:24h` had
+  `INITRD=0x170c8cf18` (clean); post-M8.16-without-the-keepalive had
+  `INITRD=0x170c82000` (overlap). The cheapest robust fix is a
+  package-level `keepEmbedInitramfsAlive = len(embed_initramfs.Bytes())`
+  in `phase2_oci_kernel_boot.go` — this preserves the pre-M8.16
+  binary-image footprint exactly, costs zero runtime, and is a
+  one-line, audit-friendly anchor for the day someone re-investigates.
+  arm64 / amd64 / loong64 happen to tolerate the shift but are kept
+  identical for symmetry. A future cleanup can replace this with a
+  proper firmware-side initrd-placement helper that's robust to
+  binary-size churn; for M8.16 we choose the deletion-correctness gate
+  over that incremental design choice.
