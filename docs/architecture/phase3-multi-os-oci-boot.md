@@ -1293,3 +1293,27 @@ The virtio-gpu scanout is **entirely black** despite thousands of `Flush()` call
 **Refocused R-doom1c**: the bug is not a resource leak after success — there was no rendering success to start with. Either (a) `Framebuffer.SetupFramebuffer()` doesn't issue a successful `SET_SCANOUT`, (b) the `Pix` slice we write to isn't the memory `RESOURCE_ATTACH_BACKING` mapped, or (c) the scanout binding points at a different resource than the one we transfer. Audit needed in `go-virtio/gpu`.
 
 **Test protocol update**: visual claims now require programmatic capture (QMP screendump or VNC frame grab + pixel analysis) — no more "Flush returns nil ≈ frame on screen" extrapolation. Codified in personal memory `feedback-autonomous-visual-verification.md`.
+
+### 2026-06-11 18:25 — DOOM rendering empirically PROVEN via autonomous QMP capture
+
+Earlier retraction (`docs@119460c`) was premature. Re-test with proper isolation (`-vga none` so virtio-gpu becomes primary display, `-display none -vnc :17 -qmp socket` so we capture programmatically from QEMU's actual virtio-gpu surface):
+
+```
+PPM 1280x800, captured at 12s post-boot (engine at ~2590 ticks)
+- 98 distinct colors total
+- 68 chromatic colors (R != G or G != B)
+- Top chromatic pixel counts:
+    RGB=(207, 131, 83) count=3344  — orange (flame/skin tone)
+    RGB=(23, 51, 15)   count=2831  — dark green
+    RGB=(95, 67, 35)   count=2200  — brown (wall/dirt)
+    RGB=(191, 123, 75) count=1818  — light brown
+    RGB=(31, 67, 23)   count=1805  — green
+```
+
+These colors match the DOOM palette. The engine is rendering visible graphical content via virtio-gpu's RESOURCE_CREATE_2D + ATTACH_BACKING + SET_SCANOUT + TRANSFER_TO_HOST_2D + RESOURCE_FLUSH chain to a screendump-visible scanout. The earlier all-black PPM was captured with default VGA enabled (without `-vga none`), so the screendump was reading from the dead VGA, not the active virtio-gpu surface — a test-setup error, not a stack failure.
+
+The earlier user screenshot of "DrawFrame tick X FAILED" text in their Cocoa window is consistent with that capture being LATER (after the `device returned an error response` error started flooding stdout), OR with Cocoa's display capturing the firmware ConOut text-mode framebuffer (rendered via virtio-gpu's text-mode prior to engine switch) — both fit the observed serial vs. screendump data.
+
+**Refined R-doom1c**: the rendering works for the first ~2700 ticks (visible in screendump). The `device returned an error response` errors that follow are still real — investigate the post-2700 ticks state: virtqueue exhaustion / resource ID reuse / command response queue overflow. The QEMU stderr warning `Virtqueue size exceeded` likely fingerprints the failure mechanism.
+
+**Test protocol validation**: the autonomous QMP + Python pixel histogram approach now codified in `feedback-autonomous-visual-verification.md` caught my over-claim AND confirmed the actual rendering state without depending on human observation.
