@@ -1,6 +1,6 @@
 # Phase 3 — OS-agnostic OCI boot
 
-**Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.2 closed 2026-06-11; ready for sprint 2 (UFS).
+**Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.3 closed 2026-06-11 (defensive FP saves on arm64/riscv64/loong64 RNG trampolines); sprint 2 (UFS) DONE; sprint 3 (NetBSD/OpenBSD) DONE; sprint 4 (Windows scaffolding) DONE.
 **Owner:** cloud-boot/tamago-uefi
 **Companion repos:** [`go-virtio`](../../../../go-virtio), [`go-filesystems`](../../../../go-filesystems)
 
@@ -363,6 +363,122 @@ validated on all three arches without an analogous failure surfacing,
 but the same defensive save/restore would be cheap to add when the
 arm64 / riscv64 / loong64 block-IO publisher trampolines land in
 sprint 1.3. Tracked as a follow-up there.
+
+## Sprint 1.3 — defensive FP callee-saved saves (R-fbsd1c, 2026-06-11)
+
+Sprint 1.3 closes the cross-arch defensive parity gap flagged at the
+end of the sprint 1.2 audit. The amd64 XMM6..XMM15 + LEAQ-direct fix
+shipped in sprint 1.2 has analogues on the other three arches that
+have not yet manifested under M8.x — purely because the firmware-side
+callees those arches' trampolines feed (the EFI-stub's RNG path) do
+not exercise FP enough to corrupt callee-saved FP registers across
+the Go→firmware return. The risk shape is identical; we apply the
+defensive infrastructure now.
+
+### Scope
+
+Sprint 1 + sprint 1.1 / 1.2 left the block-IO + SFS publisher
+trampolines (and so their corresponding asm files) **amd64-only** —
+the `//go:build tamago && amd64` constraint on
+`block_io_publish_tamago.go` / `sfs_publish_tamago.go` reflects that
+arm64 / riscv64 / loong64 publisher ports are deferred to the
+post-FreeBSD-MVP sprints. The sprint 1.3 scope is therefore
+restricted to the only firmware→Go callback trampolines that DO ship
+on all four arches today: the **RNG protocol** (`GetRNG` + `GetInfo`).
+
+| arch    | file                            | trampolines patched | FP regs saved |
+|---------|---------------------------------|---------------------|---------------|
+| arm64   | `uefiboard/rng_protocol_arm64.s`   | 2 (GetRNG, GetInfo) | D8..D15        (AAPCS64 §5.1.2) |
+| riscv64 | `uefiboard/rng_protocol_riscv64.s` | 2                   | fs0..fs11 (F8, F9, F18..F27) (RISC-V psABI LP64D) |
+| loong64 | `uefiboard/rng_protocol_loong64.s` | 2                   | fs0..fs7 (F24..F31) (LoongArch LP64) |
+
+**Total:** 6 trampolines patched (2 per arch × 3 arches). The block-IO
++ SFS trampolines on these arches remain deferred (the asm files
+don't exist yet — they'll be authored with the FP saves baked in
+once the publisher ports land).
+
+### Per-trampoline change
+
+Frame size grew to accommodate an 8-aligned FP save area appended
+past the existing integer-register saves:
+
+| arch    | GetRNG frame (old → new) | GetInfo frame (old → new) | FP area |
+|---------|---------------------------|----------------------------|---------|
+| arm64   | 128 → 192 B               | 128 → 192 B                | 64 B (8 × 8 B) |
+| riscv64 | 160 → 256 B               | 160 → 256 B                | 96 B (12 × 8 B) |
+| loong64 | 144 → 208 B               | 128 → 192 B                | 64 B (8 × 8 B) |
+
+Save mnemonic per arch:
+
+- **arm64:** `FMOVD F8, off(RSP)` ... `FMOVD F15, off(RSP)` (Go-asm
+  spelling of D-form `STR Dn, [SP, #off]`).
+- **riscv64:** `MOVD F8, off(X2)` etc. for fs0/fs1 + `MOVD F18, off(X2)`
+  through `MOVD F27, off(X2)` for fs2..fs11 (LP64D ABI's FS group).
+- **loong64:** `MOVD F24, off(R3)` through `MOVD F31, off(R3)` for
+  fs0..fs7 (LP64 LoongArch ABI).
+
+### LEAQ-direct PC helper analogues
+
+Sprint 1.2's amd64 fix had two parts. The XMM saves were one; the
+other was a per-trampoline `LEAQ ·sym(SB)` PC helper that bypasses
+the Go ABIInternal wrapper a `funcval` first-word deref would land
+on. The wrapper's trailer (XORPS X15 / MOVQ FS:0(g),R14 on amd64)
+clobbers callee-saved registers AFTER the .abi0 epilogue restored
+them — invisible to Go but observed by the firmware-side caller as
+register corruption.
+
+Sprint 1.3 mirrors the LEAQ-direct pattern on the three new arches,
+using each arch's symbol-address pseudo-instruction:
+
+| arch    | LEAQ analogue (assembler pseudo)        | Expansion            |
+|---------|------------------------------------------|----------------------|
+| arm64   | `MOVD $·sym(SB),Rn`                      | `ADRP + ADD`          |
+| riscv64 | `MOV $·sym(SB),Rn`                       | `AUIPC + ADDI`        |
+| loong64 | `MOVV $·sym(SB),Rn`                      | `PCALAU12I + ADDI`    |
+
+Each per-arch asm file gains two PC helpers
+(`rngGetRNG_trampolinePC`, `rngGetInfo_trampolinePC`); the Go-side
+consumer dispatches via a new shared helper
+`rngTrampolinePCs()` whose implementation is split per arch:
+
+- `rng_protocol_trampolinepc_amd64.go` — keeps the legacy `funcval`
+  first-word deref (sprint 1.2 did NOT touch RNG on amd64; the RNG
+  path has not manifested the wrapper-trailer bug, and the brief
+  explicitly leaves amd64 untouched).
+- `rng_protocol_trampolinepc_{arm64,riscv64,loong64}.go` — calls the
+  new per-arch asm PC helpers.
+
+amd64-side parity (RNG XMM saves + LEAQ-direct helpers) is tracked
+as a future follow-up; if a live amd64 RNG crash to the wrapper-
+trailer pattern surfaces, the swap-in is mechanical (add the
+helpers to `rng_protocol_amd64.s`, replace the `funcval`-deref
+body of `rng_protocol_trampolinepc_amd64.go`).
+
+### Verification
+
+Live tests passed on all three patched arches:
+
+```
+TAMAGO=… task kernelboot:live:arm64    # PASS — wall=18111ms
+TAMAGO=… task kernelboot:live:riscv64  # PASS — wall=18164ms
+TAMAGO=… task kernelboot:live:loong64  # PASS — wall=18166ms
+```
+
+amd64 build still compiles (no asm changes there; only the
+`rng_protocol_trampolinepc_amd64.go` extraction preserves behavior).
+No functional change expected and none observed — Sprint 1.3 is
+**pure defensive infrastructure**.
+
+### Files touched
+
+- `uefiboard/rng_protocol_arm64.s` — FP saves + PC helpers
+- `uefiboard/rng_protocol_riscv64.s` — FP saves + PC helpers
+- `uefiboard/rng_protocol_loong64.s` — FP saves + PC helpers
+- `uefiboard/rng_protocol_tamago.go` — call `rngTrampolinePCs()` instead of inline funcval-deref
+- `uefiboard/rng_protocol_trampolinepc_amd64.go` — NEW (legacy funcval-deref preserved)
+- `uefiboard/rng_protocol_trampolinepc_arm64.go` — NEW (calls PC helpers)
+- `uefiboard/rng_protocol_trampolinepc_riscv64.go` — NEW (calls PC helpers)
+- `uefiboard/rng_protocol_trampolinepc_loong64.go` — NEW (calls PC helpers)
 
 ## Relationship to existing code
 
