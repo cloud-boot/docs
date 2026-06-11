@@ -16,7 +16,7 @@ Boot operating systems other than Linux from OCI artifacts using
 | FreeBSD    | 3.2  | + UFS root                  | sprint 2 (needs `go-filesystems/ufs`) |
 | NetBSD     | 3.2  | + FFS                       | sprint 2                  |
 | OpenBSD    | 3.2  | + FFS                       | sprint 2                  |
-| Windows    | 3.3  | + NTFS                      | sprint 3 (needs `go-filesystems/ntfs`) |
+| Windows    | 4    | + NTFS + BCD                | **sprint 4.0 SCAFFOLDING DONE 2026-06-11** — blocked on real NTFS support (sprint 4.0a) |
 
 Phase 2 proved the end-to-end pipeline against Linux: OCI streaming
 + in-memory artifact + LoadImage + StartImage. Phase 3 extends that
@@ -734,6 +734,139 @@ question, not an image-pipeline question — it sits in Sprint 2D'''
   synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf, or
   ship a tiny init).
 
+## Sprint 4 — Windows scaffolding (2026-06-11)
+
+**Status:** SCAFFOLDING SHIPPED, live boot NOT attempted. Honest
+realistic-outcome path per the sprint brief.
+
+**Why:** Windows is the most ambitious OS-agnostic boot target — NTFS
+rootfs, BCD (registry-hive) boot store, Microsoft-specific UEFI loader
+path, Secure Boot gating on Windows 11. Sprint 4's deliberate output
+is the architectural map + per-component gap table, not a working
+boot.
+
+### Boot sequence (UEFI Windows)
+
+```
+firmware → \EFI\Microsoft\Boot\bootmgfw.efi     (Windows Boot Manager)
+         → \EFI\Microsoft\Boot\BCD              (registry hive — boot config)
+         → \Windows\System32\winload.efi        (kernel loader)
+         → \Windows\System32\ntoskrnl.exe       (kernel)
+         → kernel init
+```
+
+The first two files live on the EFI System Partition (FAT32) — those
+EDK2 can already handle. The last two live on the NTFS C: volume —
+**that is where Sprint 4 hits the wall.**
+
+### Per-component status table
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| OCI streaming → in-memory disk image | DONE (sprint 2D'') | Same pipeline as FreeBSD; raw single-layer artifact, SHA-256 verified. |
+| `PublishBlockIO` + `ConnectController` | DONE (sprint 1.2) | Drives PartitionDxe; ESP child surfaces. |
+| FAT32 ESP mount (for `bootmgfw.efi`) | DONE | EDK2 FatDxe binds the ESP — same as FreeBSD. |
+| `LoadImage(\EFI\Microsoft\Boot\bootmgfw.efi)` | scaffolded | Will likely succeed once the EFI path is wired; failure surfaces in next step. |
+| **BCD store** | GAP (sprint 4.1) | bootmgfw demands `\EFI\Microsoft\Boot\BCD`. Decision: **embed a pre-built BCD** extracted from a reference Windows install. On-the-fly hive construction is weeks of work and out of scope. The `buildwindowsimg -bcd <path>` flag exists for forward-compat but does NOT yet inject BCD into the FAT32 ESP (requires either a host mtools pre-pass or an in-Go FAT32 mutator). |
+| **NTFS rootfs** | HARD GAP (sprint 4.3) | `go-filesystems/ntfs` is the NTFSIMG1 *synthetic* format — its `ntfs_compat_test.go` explicitly skips when given a real Windows-formatted NTFS image (`Open() rejected real-NTFS image — this driver does not yet implement real NTFS on-disk parsing`) and ntfsfix rejects this driver's output (`writer emits the NTFSIMG1 custom format, not real NTFS`). So we can NEITHER read a real Windows NTFS volume NOR mint a writable one Go-side. |
+| OVMF NTFS DXE driver | HARD GAP | EDK2 OVMF stable202605 ships no NTFS driver — Microsoft IP removed it from upstream years ago. Community DXE drivers (KillaMaaki/NtfsDxe) exist but would need OVMF re-bundling. |
+| `winload.efi` load (off NTFS) | BLOCKED | Both paths blocked above. |
+| `ntoskrnl.exe` execution | BLOCKED | Downstream of winload. |
+| Secure Boot | GAP (sprint 4.2) | Windows 10 LTSC IoT can boot with Secure Boot disabled (BIOS setting). Windows 11 requires it + db enrollment for the bootmgfw.efi we'd be loading (we don't re-sign Microsoft's PE). |
+| TPM 2.0 | OOS | Tracked in a separate parallel sprint (TPM measurement / TCG2). Windows 11 demands TPM 2.0; Windows 10 LTSC IoT does not. |
+
+### Windows version target
+
+**Windows 10 IoT Enterprise LTSC 2021** (build 19044, supported through
+2032-01). Rationale:
+
+- Same EFI loader chain as Windows 11 (same bootmgfw / winload / ntoskrnl).
+- Does NOT require Secure Boot or TPM 2.0 to boot (configurable).
+- Has a documented IoT licensing path for embedded/cloud-boot use.
+- Allows progressive enablement: sprint 4.x ships first against LTSC,
+  then sprint 5.x layers Secure Boot + TPM to reach Windows 11.
+
+### `go-filesystems/ntfs` evaluation
+
+API surface (read 2026-06-11):
+
+- Implements `filesystem.Filesystem` + `filesystem.Symlinker` +
+  `filesystem.Labeller` from `github.com/go-filesystems/interface` —
+  YES, drop-in API-compatible with `uefiboard.PublishSFS` the same way
+  `ufs.FS` is.
+- Read/Write support against the *synthetic NTFSIMG1 format*: full
+  Open/Close/ReadFile/WriteFile/MkDir/Delete/Rename, free-list reuse,
+  in-image directory tree. **NOT a real NTFS implementation.**
+- Read support against real Windows-formatted NTFS: **NONE.** The
+  driver fails Open against a freshly-mkntfs'd image (covered by
+  `TestNTFSCompat_*`, all skip with explicit "read-side parser
+  pending" message).
+- Write support emitting real NTFS bytes: **NONE.** Cross-check via
+  `ntfsfix` rejects the driver's output as "not real NTFS".
+
+**Verdict:** the package is API-shaped for sprint-4 wire-up but the
+on-disk format gap is total. Wiring it via `PublishSFS(ntfsFS)` today
+would publish an NTFSIMG1-formatted FS to bootmgfw, which would
+attempt to read `\Windows\System32\winload.efi` from it and fail
+because the byte layout is unrecognised.
+
+### BCD strategy
+
+**Decided: Option A — embed a pre-built BCD** extracted from a
+reference Windows install via `hivex` / `chntpw` on a Linux helper
+host. The buildwindowsimg `-bcd <path>` flag accepts the resulting
+hive file for forward-compat; FAT32 injection lands in sprint 4.1.
+
+Option B (build on-the-fly via a Go hive writer) was rejected: the
+Microsoft hive format is documented but undocumented enough at the
+key-cell level that a robust writer is ~2–4 weeks of work — out of
+proportion for a scaffolding sprint.
+
+### Scaffolding shipped this sprint
+
+- `tamago-uefi/phase3_oci_windows_boot.go` + `phase3_oci_windows_boot_stub.go` —
+  probe entry-point, build-tag-gated `phase3_oci_windows_boot`, prints
+  per-component gap status. Real symbol use kept under `if false` so
+  the publish trampolines / ministack / oci imports stay live and
+  refactor-tracked.
+- `tamago-uefi/phase2_dispatch.go` — dispatcher wires
+  `runOCIWindowsBootProbe` after the FreeBSD/NetBSD/OpenBSD probes.
+  Build-tag union extended.
+- `tamago-uefi/internal/livewindowsboot/run.sh` — QEMU+OVMF runner.
+  Default mode asserts the documented gap-status gates print
+  (sanity); a `CLOUDBOOT_WINDOWS_LIVE=1` mode exists for future
+  sprint use but the chain CANNOT complete end-to-end this sprint.
+- `tamago-uefi/internal/livewindowsboot/buildwindowsimg/main.go` —
+  pure-Go GPT image builder with the three canonical Windows
+  partition types (MSR / ESP / MBD); accepts `-fat32`, `-ntfs`,
+  `-bcd` for forward-compat. Tested: emits a valid PMBR+GPT with
+  the Microsoft MSR + ESP layout and UCS-2LE partition names.
+- `tamago-uefi/Taskfile.yaml` — `windowsboot:elf:amd64`,
+  `windowsboot:efi:amd64`, `windowsboot:live:amd64` targets +
+  clean removal entry.
+
+Build verified: `task windowsboot:efi:amd64` produces a 2.9 MB
+BOOTX64-WINDOWSBOOT.EFI on the tamago amd64 toolchain.
+
+Live boot: **NOT attempted.** The four gap rows in the status table
+above are real blockers; attempting the live path today would only
+prove the bootmgfw "BCD store could not be opened" error or an OVMF
+NTFS-driver-missing trap, neither of which advances state-of-art over
+what this document already records.
+
+### Honest roadmap to functional Windows boot
+
+| Sprint | Target | Gap to close |
+|--------|--------|---------------|
+| 4.0 (this) | Scaffolding + gap-status doc | DONE |
+| 4.0a | `go-filesystems/ntfs` real on-disk read | port a public NTFS reader to pure Go (linux-ntfs/ntfs-3g reference; rejected GPL, so clean-room from MS-FSSPEC + Linux kernel `fs/ntfs3`). Months. |
+| 4.1 | BCD pre-built injection | `buildwindowsimg -bcd` actually writes `\EFI\Microsoft\Boot\BCD` into the FAT32 ESP. Needs FAT32 mutator (host mtools pre-pass is easier). |
+| 4.2 | Secure Boot accommodation | accept-as-is for Windows 10 LTSC (Secure Boot off). Windows 11 requires Microsoft KEK/db enrollment in OVMF — sprint 4.6+. |
+| 4.3 | NTFS DXE injection OR Go-side NTFS publish | either bundle a community NTFS DXE (KillaMaaki/NtfsDxe) into OVMF and re-flash, OR ship sprint-4.0a + `PublishSFS(realNtfsFS)`. The Go-side path is preferred (keeps OVMF stock). |
+| 4.4 | live LTSC boot to `winload.efi` banner | combines 4.0a + 4.1 + 4.3. |
+| 4.5 | live LTSC boot to ntoskrnl banner | downstream of 4.4. |
+| 4.6 | Windows 11 path (TPM 2.0 + Secure Boot KEK/db) | depends on parallel TPM sprint + OVMF cert enrollment. |
+
 ## Roadmap
 
 | Sprint | Target                                    | Gap to close |
@@ -753,7 +886,14 @@ question, not an image-pipeline question — it sits in Sprint 2D'''
 | 2F     | mfsroot or rootfs hint so kernel reaches single-user | synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf |
 | 2G     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
 | 3      | NetBSD / OpenBSD                          | FFS family in go-filesystems; loader names differ |
-| 4      | Windows                                    | `go-filesystems/ntfs` + UEFI-stub special-casing |
+| 4.0    | Windows scaffolding + gap-status doc       | **DONE 2026-06-11** — `phase3_oci_windows_boot.go` + `internal/livewindowsboot/` + Sprint 4 doc section |
+| 4.0a   | `go-filesystems/ntfs` real on-disk read    | Clean-room port from MS-FSSPEC + Linux `fs/ntfs3`; today's package is NTFSIMG1 synthetic |
+| 4.1    | BCD pre-built injection into FAT32 ESP     | `buildwindowsimg -bcd` actually writes `\EFI\Microsoft\Boot\BCD` |
+| 4.2    | Secure Boot accommodation for Win 10 LTSC  | accept Secure-Boot-off; Win 11 KEK/db deferred |
+| 4.3    | NTFS DXE injection OR Go-side NTFS publish | bundle NtfsDxe into OVMF OR ship 4.0a + `PublishSFS(realNtfsFS)` |
+| 4.4    | Live LTSC boot to `winload.efi` banner     | 4.0a + 4.1 + 4.3 |
+| 4.5    | Live LTSC boot to ntoskrnl banner          | downstream of 4.4 |
+| 4.6    | Windows 11 path                            | TPM 2.0 (separate sprint) + Secure Boot KEK/db enrollment |
 
 ## References
 
