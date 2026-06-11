@@ -1245,3 +1245,11 @@ phase3-oci-doom-boot: handing off to gore.Run — DOOM main loop starting
 3. Full TamaGo runtime fits comfortably inside 256 MiB heap for DOOM (28 MB embedded WAD + ~36 MB engine working set + virtio buffers + Go runtime + spare).
 
 Next sprint (DOOM 1.1): extend the live runner's PASS gate to validate actual frame production (e.g., tic counter advance, virtio-gpu RESOURCE_FLUSH calls) and/or capture a frame buffer dump to confirm visible game-screen output. This requires either an internal DOOM frame-counter println hook or a virtio-gpu Flush-call counter exposed via the probe.
+
+### 2026-06-11 17:45 — R-tpm1a status update (build OK / live blocks elsewhere)
+
+The earlier "linkcpuinit unresolved Bloc" error was a false alarm — caused by missing `GOOSPKG=github.com/usbarmory/tamago` + `GOOS=tamago` env vars on direct `go build` invocation. With the proper TamaGo env (as the kernelboot:elf Taskfile entry sets), `-tags phase2_tpm_measure` builds cleanly (7 MB EFI).
+
+Live test against swtpm 2.0 emulator: QEMU starts, swtpm process up, but QEMU produces ZERO stdout (qemu.log empty after 200s wall-clock timeout). The TamaGo probe never prints its phase2-probe banner — something blocks earlier than the cloud-boot main(). Likely candidates: tpm-tis device init in EDK2's Tcg2Dxe blocks waiting for response; or the swtpm socket isn't reachable to QEMU.
+
+R-tpm1a refocused: investigate tpm-tis emulation handshake (vs tpm-crb) + verify swtpm socket path + add diagnostic println BEFORE LocateTCG2() to confirm whether the probe is reached at all. Build path is fully working; live test infrastructure needs the firmware-side gate diagnosed.
