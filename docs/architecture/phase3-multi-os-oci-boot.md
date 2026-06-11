@@ -374,15 +374,152 @@ without conflict — the consumer reads `(*EFIBlockIOProtocol).ReadBlocks`,
 the publisher provides one — and they share the GUID + struct-layout
 constants in `block_io_protocol.go`.
 
+## Sprint 2C — UFS-backed FreeBSD root (2026-06-11)
+
+Sprint 2C shipped as **three independent agents** plus an **integration
+pass** that wired them into the live FreeBSD boot pipeline.
+
+### 2C-A — pure-Go UFS2 writer (`go-filesystems/ufs@8b415bc`)
+
+`ufs.Mkfs(w io.WriterAt, sizeBytes int64) (*FS, error)` mints a fresh
+UFS2 filesystem onto a backing `ReadWriterAt`, populating the
+canonical superblock at byte 65536 plus one cylinder-group header
+per 1 MiB of size. Companion `WriteFile / MkDir / Symlink / Rename
+/ Delete` writers let callers populate the filesystem in-process.
+Defaults: `bsize=4096`, `fsize=4096`, single-indirect — gives every
+file a 2 MiB cap (`(NumDirect+Nindir)*bsize = (12+512)*4096`).
+Cross-validated against a real FreeBSD-makefs reference image via
+`crossvalidate_test.go`. 2300 LOC, 85.7% line coverage.
+
+### 2C-B — real FreeBSD UFS2 fixture (`internal/livefreebsdboot/extractufs`)
+
+`install.sh` + `extract_ufs.sh` + `minimize_fixture.sh` pull the
+upstream `FreeBSD-14.3-RELEASE-amd64.raw.xz` VM image, carve out the
+5 GiB `freebsd-ufs` partition (`516E7CB6-6ECF-11D6-8FF8-00022D09712B`),
+and emit a 30 MiB `bootroot.tar` containing `/boot/{kernel/kernel,
+kernel/*.ko (virtio subset), loader.conf, loader.efi, ...}`. The
+verify binary uses a pinned snapshot of `go-filesystems/ufs` at the
+sprint-2A read-only commit so the cross-check is immune to the
+write-side changes 2C-A lands. Synthesises `/boot/loader.conf` from
+a checked-in template (the upstream VM image ships none).
+
+### 2C-C — fresh UFS2 oracle (`internal/livefreebsdboot/genufs`)
+
+Docker-driven `kusumi-makefs` builds a 64 MiB UFS2 image from a
+staged `/boot + /etc` tree. The gold oracle: a third-party,
+FreeBSD-correct `Mkfs` to validate our pure-Go writer against.
+
+**Cross-learning narrative — the SBLOCK offset gotcha**: NetBSD's
+`makefs` defaults to placing the UFS2 superblock at byte 8192 (FFSv1
+convention); FreeBSD's expects it at byte 65536 (FFSv2). The first
+2C-C cut used NetBSD `makefs` for portability and produced an image
+that our reader rejected as "no UFS2 magic at offset 65536." Pivoting
+to the kusumi-makefs port (FreeBSD-flavored) immediately closed the
+gap. Documented in `genufs/README.md` so future sprints (2E arm64,
+3 NetBSD/OpenBSD) don't burn the same hour.
+
+### 2C-Integration — `buildespimg -ufs` wires the three together
+
+`internal/livefreebsdboot/buildespimg/main.go` gained a `-ufs <tar>`
+flag. When set, the output disk is a 2-partition GPT:
+
+```
+LBA 0          : Protective MBR
+LBA 1          : Primary GPT header
+LBA 2..33      : Primary partition entry array
+LBA 64..32831  : FAT16 ESP (16 MiB, type C12A7328-..., contains
+                 \EFI\BOOT\BOOTX64.EFI = loader.efi)
+LBA 34816..    : FreeBSD-UFS (8 MiB by default, type 516E7CB6-...,
+                 minted in-process via go-filesystems/ufs.Mkfs +
+                 populated from the tar via fs.MkDir + fs.WriteFile +
+                 fs.Symlink)
+LastLBA-33..   : Backup partition entry array
+LastLBA        : Backup GPT header
+```
+
+The disk is cross-validated before push: `dd` carves out the UFS
+partition slice, `extractufs/verify/verify -require-loader-conf=true
+-require-kernel=false` opens it via the **pinned** sprint-2A read-only
+snapshot of `go-filesystems/ufs` (NOT our own writer's reader — the
+oracle is independent) and asserts `/boot/loader.conf` is present
+and parses. Any divergence between our writer's on-disk bytes and
+the upstream-pinned reader fails the build closed.
+
+### Live test outcome (2026-06-11)
+
+```
+phase3-oci-freebsd-boot: PublishBlockIO OK; block handle = 0x7e204398
+phase3-oci-freebsd-boot: ConnectController OK
+phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found 2 handle(s)
+phase3-oci-freebsd-boot: matching SFS child handle = 0x7d603e98
+phase3-oci-freebsd-boot: LoadImage( \EFI\BOOT\BOOTX64.EFI ) OK
+phase3-oci-freebsd-boot: PublishSFS OK; UFS-backed SFS handle = 0x7d5f9d98   ← NEW gate
+phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE
+```
+
+…then the FreeBSD loader.efi banner:
+
+```
+FreeBSD/amd64 EFI loader, Revision 3.0
+Trying ESP: ... HD(1,GPT,BF103427-B57F-F240-AFCA-3E579CFC9597)
+Setting currdev to disk1p1:
+Trying:    ... HD(2,GPT,9A7B8338-79A0-AC47-A3B4-7F5007F2C72B)
+Setting currdev to disk1p2:                                       ← UFS reached!
+```
+
+**loader.efi successfully enumerated and selected our UFS partition
+(disk1p2) via the EFI_SIMPLE_FILE_SYSTEM_PROTOCOL surface we
+published.** It then fails to load the kernel — the new boundary
+queued for sprint 2D.
+
+### Sprint 2C-Integration boundary → sprint 2D scope
+
+The pure-Go writer (`ufs.Mkfs`) defaults to `bsize=4096` + single-
+indirect-only block pointers, capping per-file size at:
+
+> `(NumDirect + Nindir) × bsize = (12 + 512) × 4096 ≈ 2.0 MiB`
+
+The FreeBSD `/boot/kernel/kernel` is 29 MiB — well beyond that cap.
+`buildespimg` therefore skips files over the writer cap with a clear
+diagnostic, so the UFS partition we hand to loader.efi has every
+file EXCEPT the kernel itself.
+
+**Sprint 2D scope** (queued):
+
+1. Extend `ufs.Mkfs` to accept a `bsize` knob (32 KiB is the
+   FreeBSD newfs default; would raise Nindir to 4096 → per-file cap
+   ~134 MiB single-indirect alone — enough for the kernel).
+2. Add double-indirect support to `writeFileData` so the writer can
+   address files up to (12 + N + N²) × bsize ≈ 64 GiB without
+   triple-indirect.
+3. Keep 100% cov per `go-deltasync`-style HARD RULE (per CLAUDE.md
+   feedback) so the writer extension lands clean.
+4. Re-run sprint-2C-Integration live test; expected outcome — kernel
+   loads, prints `FreeBSD/amd64 (...) #N: ...` banner, reaches
+   `mountroot>` (and likely fails there because we have no rootfs
+   image beyond /boot/ — that's the sprint 2D' follow-up: provide a
+   `vfs.root.mountfrom` hint pointing at a synthetic mfsroot or wire
+   `/boot/loader.conf` to `boot_mfsroot="YES"` + ship an mfsroot.gz).
+
+The publish-side stack (PublishBlockIO + PublishSFS + UFS-as-SFS
+adapter) is sprint-2C-complete: every layer the loader.efi walks is
+already wired and proven by the live test.
+
 ## Roadmap
 
 | Sprint | Target                                    | Gap to close |
 |--------|-------------------------------------------|---------------|
 | 1.1    | LoadImage from discovered SFS              | DONE (SFS-parent filter + LoadImageFromSFS + custom ESP image) |
-| 1.2    | Resolve `ConnectController` `#PF`          | **DONE** — XMM6..XMM15 save in trampolines + bypass ABIInternal wrapper via `LEAQ`-based PC helper |
+| 1.2    | Resolve `ConnectController` `#PF`          | DONE — XMM6..XMM15 save in trampolines + bypass ABIInternal wrapper via `LEAQ`-based PC helper |
 | 1.3    | arm64 / riscv64 / loong64 publisher trampolines | port `block_io_publish_amd64.s` + defensive D8..D15 / fs0..fs11 / f24..f31 save |
-| 2      | FreeBSD with UFS root                     | `go-filesystems/ufs` + filesystem publish (so loader.efi finds a kernel) |
-| 3      | NetBSD / OpenBSD                          | FFS support in go-filesystems |
+| 2B     | EFI_SIMPLE_FILE_SYSTEM_PROTOCOL surface    | DONE — UFS-backed SFS wire + GPT partition detection |
+| 2C-A   | pure-Go UFS2 writer (`ufs.Mkfs`)           | DONE — single-indirect + bsize=4096 default |
+| 2C-B   | real FreeBSD UFS2 fixture (`extractufs`)   | DONE — bootroot.tar + verifier against pinned 2A reader |
+| 2C-C   | fresh UFS2 oracle via kusumi-makefs        | DONE — gold cross-check for 2C-A writer |
+| 2C-Int | wire 2C-A + 2C-B into live boot via `buildespimg -ufs` | **DONE** — 2-partition GPT, PublishSFS OK, loader.efi reads UFS @ disk1p2 |
+| 2D     | bsize=32768 + double-indirect → ship the 29 MiB kernel | extend `ufs.Mkfs` opts + `writeFileData`; mfsroot or rootfs hint so kernel mounts something |
+| 2E     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
+| 3      | NetBSD / OpenBSD                          | FFS family in go-filesystems; loader names differ |
 | 4      | Windows                                    | `go-filesystems/ntfs` + UEFI-stub special-casing |
 
 ## References
