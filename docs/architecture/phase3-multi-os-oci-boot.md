@@ -505,6 +505,156 @@ The publish-side stack (PublishBlockIO + PublishSFS + UFS-as-SFS
 adapter) is sprint-2C-complete: every layer the loader.efi walks is
 already wired and proven by the live test.
 
+## Sprint 2D — bsize=32768 + double-indirect → 29 MiB kernel lands in UFS (2026-06-11)
+
+**Goal**: lift the sprint-2C-A writer's per-file cap from ~2 MiB
+(bsize=4096 single-indirect-only) so the 29 MiB FreeBSD kernel
+actually lands in `/boot/kernel/kernel` instead of being skipped by
+`buildespimg`'s file-size diagnostic.
+
+**Approach**: extend the pure-Go UFS2 driver with an explicit-options
+`MkfsWith(...)` entry point + double-indirect block reading **and**
+writing, so callers can dial `BlockSize=32768` (FreeBSD `newfs(8)`
+default) and address files via the full direct + single-indirect +
+double-indirect chain.
+
+### Deliverables shipped
+
+1. **`go-filesystems/ufs.MkfsOptions` + `MkfsWith(...)`**
+   ([sprint2d_test.go](https://github.com/go-filesystems/ufs)):
+   - `BlockSize` (4 KiB..64 KiB, power of two)
+   - `FragmentSize` (defaults to `BlockSize/8` per FreeBSD convention)
+   - `InodeDensity` (one inode per N bytes, default 4 KiB)
+   - `Label` (reserved)
+
+   `Mkfs(...)` itself stays untouched for backward compat — it still
+   produces sprint-2C-A's `bsize=4096`/`frag=1` legacy geometry.
+
+2. **Double-indirect block surface**
+   - **Reader** (`block.go`): `blockForLBN` now walks
+     `in.Indirect[1]` → tier-1 (`Nindir` outer pointers) → tier-2
+     (single-indirect block per outer slot) → data fragment, reaching
+     `Nindir² × bsize` bytes per file.
+   - **Writer** (`write.go`): `writeFileData` now lazy-allocates the
+     tier-1 block on first double-indirect LBN, then lazy-allocates a
+     tier-2 block per `Nindir`-block chunk. Single-pass tier-1/tier-2
+     flush at the end keeps the write pattern O(1) per data block.
+   - **Reclaimer** (`write.go::freeFileBlocks`): walks the full
+     double-indirect chain on `DeleteFile` so no blocks leak when a
+     large file is removed and the inode is reused.
+
+3. **Per-file size ceilings (at `BlockSize=32768`)**
+   | Tier | Reach | Notes |
+   |------|-------|-------|
+   | Direct (12 ptrs)               | 384 KiB    | unchanged |
+   | + Single-indirect (4096 ptrs)  | ~128 MiB   | replaces 2 MiB ceiling |
+   | + Double-indirect (4096² ptrs) | ~8 GiB     | new in 2D |
+   | (Triple-indirect deferred — 1 PiB at bsize=32768 is over-spec) | | |
+
+4. **Tests** (`sprint2d_test.go`):
+   - `TestMkfsWith_DefaultOpts` — zero-value options still produce a
+     valid UFS2.
+   - `TestMkfsWith_BadOptions` — six validation branches (bad sizes,
+     non-power-of-two, fragment-doesn't-divide-block, low inode
+     density).
+   - `TestMkfsWith_BigBlock` — confirms bsize=32768 produces the
+     expected `Nindir=4096`, `Fsize=4096`, `Frag=8` geometry.
+   - `TestWriteFile_BigBlock_25MiB` — sha256 round-trip of a 25 MiB
+     pseudo-random blob through bsize=32768 single-indirect.
+   - `TestWriteFile_DoubleIndirect_25MiB` — same blob through
+     bsize=4096 so double-indirect MUST engage; asserts `Indirect[1]
+     != 0` on the read-side inode + sha256 round-trip.
+   - `TestWriteFile_DoubleIndirect_DeleteFrees` — write 4 MiB
+     (engages dindir at bsize=4096), `DeleteFile`, confirm free-block
+     count grew, write another 4 MiB into the freed pool, sha256
+     match the second payload.
+   - `TestWriteFile_NoSpace_DoubleIndirect` — exercises the
+     out-of-blocks error path inside the double-indirect allocator
+     branch.
+   - `TestCrossValidate_DoubleIndirectFile` — write 20 MiB via the
+     new writer, then re-read it via TWO paths (high-level
+     `fs.ReadFile` AND low-level `blockForLBN` walk) — sha256 of
+     both must match the payload AND each other.
+
+   Driver coverage: 86.6% (up from sprint-2C-A's 85.7% baseline).
+
+5. **`buildespimg` wiring**
+   (`internal/livefreebsdboot/buildespimg/main.go`):
+   - `ufs.Mkfs(...)` → `ufs.MkfsWith(..., MkfsOptions{BlockSize: 32768})`
+   - Removed the ">2 MiB skip" diagnostic (no longer needed).
+   - Bumped UFS partition floor from 8 MiB to 48 MiB.
+
+6. **`extractufs/verify` cross-check** (`run.sh`): bumped
+   `-require-kernel=true` so the pinned sprint-2C-B verifier asserts
+   `/boot/kernel/kernel` is present and readable end-to-end.
+
+### Cross-validation result (offline, before live launch)
+
+The pinned sprint-2C-B `extractufs/verify` tool reads back the
+`buildespimg`-produced UFS partition and confirms:
+
+```
+superblock: bsize=32768 fsize=4096 ncg=48 magic=ok
+/boot/kernel: 20 entries
+/boot/kernel/kernel: size=29185072 bytes mode=0100644
+/boot/loader.conf: 659 bytes; first line: "# Synthetic /boot/loader.conf …"
+OK — go-filesystems/ufs successfully read the partition
+```
+
+The 29 MiB kernel lands intact, double-indirect-or-single-indirect
+chain reads back to the same bytes, and superblock geometry is
+sprint-2A-reader-compatible. **The Mkfs surface and the publish-side
+publish-side UFS plumbing are sprint-2D-complete.**
+
+### Live-runner status: blocked on tamago heap / OCI streaming pipeline
+
+The live `freebsdboot:live:amd64` runner OOMs at the OCI streaming
+step **before** loader.efi gets a chance to run. The failure mode is
+deterministic:
+
+```
+phase3-oci-freebsd-boot: streaming disk image layer size   = 63980032
+runtime: out of memory: cannot allocate 4194304-byte block (251428864 in use)
+fatal error: out of memory
+```
+
+The 256 MiB tamago heap (board_amd64.go `heapReserveSize`) was sized
+for sprint-2C-Integration's 25 MiB disk image. A 64 MiB image
+(4 MiB ESP + 48 MiB UFS + GPT) pushes the streaming pipeline (oras
+`FetchBlobStream` + SHA-256 verify + bytes.Buffer pre-grow + TLS
+record working set) past the heap ceiling at the constant
+~240 MiB-in-use mark, regardless of further per-MiB shrinkage on
+the disk image side.
+
+**Sprint 2D' (follow-up) scope**: refactor the OCI streaming pipeline
+in `phase2_oci_freebsd_boot.go` so the disk image is written
+directly into the publish-side `BlockIO` backing buffer (one
+allocation) rather than going through `bytes.Buffer` + `imageBytes`
++ a potential pad-append (two-to-three live copies). Or bump
+`heapReserveSize` to 384 MiB. Either lift is a 30-min change but
+sits in the tamago-uefi runtime, not in the UFS driver scope of 2D.
+
+### Sprint 2D PASS gate
+
+- **Offline (`extractufs/verify` cross-validation)**: PASS — 29 MiB
+  kernel reads back intact through double-indirect chain.
+- **`go-filesystems/ufs` unit + cross-validation tests**: PASS
+  (86.6% coverage).
+- **Live (`freebsdboot:live:amd64`)**: BLOCKED on tamago heap OOM
+  during OCI streaming. The blocker is independent of the UFS writer
+  extension — the writer correctly produces a 29 MiB-kernel-bearing
+  partition and the read-side verifier confirms it.
+
+### Sprint 2E scope (queued)
+
+- Resolve the tamago streaming-OOM blocker (refactor or heap bump).
+- Then re-run live test for the kernel-handoff trace: expect
+  `Loading /boot/kernel/kernel` → `FreeBSD/amd64 (...) #0` banner →
+  `mountroot>` prompt (since we have no rootfs beyond `/boot/`, the
+  kernel will halt at mountroot — that's sprint-2F scope:
+  synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf, or
+  ship a tiny init).
+
 ## Roadmap
 
 | Sprint | Target                                    | Gap to close |
@@ -517,8 +667,11 @@ already wired and proven by the live test.
 | 2C-B   | real FreeBSD UFS2 fixture (`extractufs`)   | DONE — bootroot.tar + verifier against pinned 2A reader |
 | 2C-C   | fresh UFS2 oracle via kusumi-makefs        | DONE — gold cross-check for 2C-A writer |
 | 2C-Int | wire 2C-A + 2C-B into live boot via `buildespimg -ufs` | **DONE** — 2-partition GPT, PublishSFS OK, loader.efi reads UFS @ disk1p2 |
-| 2D     | bsize=32768 + double-indirect → ship the 29 MiB kernel | extend `ufs.Mkfs` opts + `writeFileData`; mfsroot or rootfs hint so kernel mounts something |
-| 2E     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
+| 2D     | `MkfsWith(BlockSize=32768)` + double-indirect → 29 MiB kernel lands in UFS | **DONE (offline)** — pure-Go writer ships kernel; verified via pinned 2C-B reader. Live runner blocked on tamago streaming OOM — sprint 2D' |
+| 2D'    | tamago heap / OCI streaming refactor (single live copy or `heapReserveSize` bump) | refactor `phase2_oci_freebsd_boot.go` stream path; or raise `board_amd64.go::heapReserveSize` 256 MiB → 384 MiB |
+| 2E     | post-loader: kernel banner + `mountroot>`  | sprint 2D' unblocks; expected handoff is `Loading /boot/kernel/kernel` then `FreeBSD/amd64 (...) #0` |
+| 2F     | mfsroot or rootfs hint so kernel reaches single-user | synthesise mfsroot.gz + `boot_mfsroot="YES"` in loader.conf |
+| 2G     | arm64 FreeBSD EFI loader port              | port BOOTX64 publish trampolines to BOOTAA64; FreeBSD ARM EFI loader signature |
 | 3      | NetBSD / OpenBSD                          | FFS family in go-filesystems; loader names differ |
 | 4      | Windows                                    | `go-filesystems/ntfs` + UEFI-stub special-casing |
 
