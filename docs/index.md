@@ -8,11 +8,16 @@ title: cloud-boot — overview
 `Virtualization.framework`, and OpenStack — no per-image rebuild, no
 custom signing, no kernel-side ZFS module.**
 
-cloud-boot ships **two complementary tracks** that all land on the
-same end state — a stock distro userspace from an unmodified cloud
+cloud-boot ships **three complementary tracks** that all land on the
+same end state — a stock OS userspace from an unmodified cloud
 image. Phase 1 is the Linux-side UKI toolchain with three boot
 paths ; Phase 2 is a pure-Go bare-metal UEFI loader that drives the
-whole networked-OCI pipeline from inside Boot Services.
+whole networked-OCI pipeline from inside Boot Services and chain-boots
+Linux on all four arches ; Phase 3 generalises Phase 2 into an
+OS-agnostic OCI boot architecture — same loader, but publishing its
+own `EFI_BLOCK_IO_PROTOCOL` + `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` over
+an in-memory UFS2 / FAT / NTFS image and chain-booting the target
+OS's native first-stage loader.
 
 <div class="grid cards" markdown>
 
@@ -44,7 +49,7 @@ whole networked-OCI pipeline from inside Boot Services.
     ext4 / xfs / btrfs / UFS2 rootfs. Useful on QEMU/OVMF and EDK2
     hardware ; six Linux families + FreeBSD + NetBSD verified.
 
--   :material-language-go:{ .lg .middle } __Phase 2 — pure-Go TamaGo loader__
+-   :material-language-go:{ .lg .middle } __Phase 2 — pure-Go TamaGo loader (Linux)__
 
     ---
 
@@ -55,12 +60,45 @@ whole networked-OCI pipeline from inside Boot Services.
     real Debian 13 userspace. **Live end-to-end Linux userspace
     on all four arches** (amd64 + arm64 + riscv64 + loong64) as of
     2026-06-10 — 16-18 s wall-clock from a cold DHCP lease.
-    `R-amd64j` closed the amd64 saga via an `initrd=` cmdline
-    workaround for the EDK2 OVMF amd64 `LoadFile2` quirk ; the
-    other three arches use the `LoadFile2` protocol the kernel
-    prefers.
+    `M8.15` ([`51f7005`](https://github.com/cloud-boot/tamago-uefi/commit/51f7005))
+    unified all four arches on the `initrd=` cmdline path ;
+    `M8.16` ([`2868756`](https://github.com/cloud-boot/tamago-uefi/commit/2868756))
+    excised ~1684 LOC of dead `LoadFile2` publish code.
+
+-   :material-earth:{ .lg .middle } __Phase 3 — OS-agnostic OCI boot__
+
+    ---
+
+    Same TamaGo loader, but it materialises an in-memory UFS2 /
+    FAT / NTFS image containing the target OS's own first-stage
+    loader (`loader.efi`, `boot.efi`, `bootmgfw.efi`), publishes it
+    through pure-Go `EFI_BLOCK_IO_PROTOCOL` +
+    `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` shims, and chain-boots that
+    loader via `LoadImage` + `StartImage`. **OpenBSD reaches
+    `boot>` live end-to-end** on amd64 as of 2026-06-11
+    ([`d66d338`](https://github.com/cloud-boot/tamago-uefi/commit/d66d338)).
+    FreeBSD selects our UFS as `currdev` and OOMs at kernel-load
+    (sprint 2E pending,
+    [`c37108f`](https://github.com/cloud-boot/tamago-uefi/commit/c37108f)).
+    NetBSD scaffolding gated on ISO download size ; Windows
+    scaffolding gated on a real NTFS reader (multi-month).
+    Built on the new pure-Go
+    [`go-filesystems/ufs`](https://github.com/go-filesystems/ufs)
+    read+write driver with `Mkfs` and double-indirect support
+    (sprint 2A+2C-A+2D), cross-validated against three parallel
+    UFS2 sources.
 
 </div>
+
+## Multi-OS status matrix — Phase 3 (2026-06-11)
+
+| OS                  | amd64      | arm64 | riscv64 | loong64 | Notes |
+| ------------------- | ---------- | ----- | ------- | ------- | ----- |
+| Linux (Debian 13)   | LIVE       | LIVE  | LIVE    | LIVE    | Phase 2 ; userspace, 16-18 s cold-DHCP ; unified on `initrd=` (`M8.15`) |
+| OpenBSD             | **LIVE**   | —     | —       | —       | `boot>` end-to-end (sprint 3) |
+| FreeBSD             | partial    | —     | —       | —       | `loader.efi` `currdev` OK ; OOM at kernel-load (sprint 2E) |
+| NetBSD              | scaffolded | —     | —       | —       | probe + EFI + runner ready ; gated on ISO size |
+| Windows             | scaffolded | —     | —       | —       | `BOOTX64-WINDOWSBOOT.EFI` ships ; gated on real NTFS reader |
 
 ## What this site covers
 
