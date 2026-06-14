@@ -103,6 +103,7 @@ nav:
       - TamaGo UEFI (Path D): architecture/tamago-uefi.md
       - Phase 3 — OS-agnostic OCI boot: architecture/phase3-multi-os-oci-boot.md
       - DOOM provable test protocol (R-doom1g): architecture/doom-provable-protocol.md
+      - Quake roadmap (DOOM → Q1 → Q2 → Q3): architecture/quake-roadmap.md
   - Filesystem drivers:
       - filesystems/index.md
       - ext4: filesystems/ext4.md
