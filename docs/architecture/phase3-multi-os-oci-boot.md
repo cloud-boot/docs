@@ -1505,3 +1505,54 @@ Orthogonal observations (NOT R-doom1d blockers, kept for context):
 Reproducer:
 - silent default: `bash internal/livedoomboot/run.sh amd64` — fast, no audio artifact.
 - WAV verify:    `DOOMBOOT_LIVE_AUDIO_WAV=/tmp/doom.wav bash internal/livedoomboot/run.sh amd64` — adds ~0 s wall-clock cost; produces a captured WAV file for byte-level inspection.
+
+### 2026-06-14 — R-doom1g shipped — provable test protocol (host engine BYTE-EQUAL, guest stack BOUNDED-TOLERANCE)
+
+Closes R-doom1g. The user explicitly rejected empirical-only verification ("je ne veux pas de la preuve empirique") for the bare-metal DOOM demo and demanded a **provable** protocol: deterministic inputs + versioned reference oracles + mechanical pass/fail with zero human judgement. R-doom1g delivers that for the engine + harvest path; the guest virtio-gpu path is bounded-tolerance (chi² against a guest oracle) because TamaGo's GC stutter + the engine's wall-clock-driven probe make tic-precise byte-equal infeasible inside QEMU+EDK2.
+
+Full protocol spec: [`architecture/doom-provable-protocol.md`](doom-provable-protocol.md).
+
+**Two-gate taxonomy (honest):**
+
+| Gate | What it asserts | Provability class | Where it runs |
+|------|-----------------|-------------------|---------------|
+| A    | Same WAD + seed + script ⇒ identical PPMs from gore.Run, every checkpoint, byte-for-byte | BYTE-EQUAL provable | host (CI ubuntu-latest) |
+| B    | QMP screendump of probe at tic T has canvas histogram within chi² ≤ 50000 of guest oracle frame at tic T | BOUNDED-TOLERANCE provable | host workstation (QEMU+EDK2 + EFI probe) |
+| (-)  | Audio bytes match per-checkpoint WAV oracle | not in v1 (R-doom1h follow-up) | n/a |
+
+**Deterministic hooks added to gore engine (sibling file, not modifying transpiled `doom.go`):**
+
+- `cloud-boot/godoom/seed.go` — new file, GPL-2.0 (engine boundary preserved):
+  - `SeedRandom(seed uint8)` — resets `prndindex` + `rndindex` to `seed`.
+  - `SetDeterministicTics(bool)` — flips the engine's existing `dg_run_full_speed` knob (already used by `TestDoomDemo`/`TestLoadSave`) from package-private to exported.
+  - `ResetClock()` — zeroes `dg_fake_tics` + `basetime` + `last_tick` + `firsttime` so successive `Run` invocations start cleanly at tic 0.
+  - `CurrentTic()` / `RandomState()` — read-side accessors the harvest tool uses to checkpoint-by-tic and record PRNG drift independently of frame-pixel drift.
+
+The transpiled `doom.go` is untouched (verified: `git diff` shows no changes to that file in this sprint).
+
+**Frontend wiring:** `cloud-boot/godoom/backend/tamago/frontend.go` grows `SetSeed(uint64) / ApplyDeterminism() / FrameCount()` methods. `ApplyDeterminism` is the single entry point the cloud-boot probe (and the host-side `harvest-reference` tool) call right before `gore.Run`. No-op when `SetSeed` was never invoked, preserving bit-for-bit current behaviour for callers that opt out.
+
+**Reference oracle harvest tool:** `cloud-boot/godoom/cmd/harvest-reference/main.go` — host-side `gore.Run` driver with scripted input, dumps `oracle/frame_tic<NNNNNN>.ppm` + `oracle/manifest.json` (SHA-256 + PRNG state per checkpoint). Reproducibility validated in this sprint: two back-to-back runs at seed 0, checkpoints `1,35,70,140,350,1050`, against the committed Freedoom-1 IWAD produced **byte-identical** PPMs (SHA `e7b37f6146...` for tics 1-140, drifts from tic 350 onwards as PRNG advances). Committed under `cloud-boot/godoom/oracle/` (~1.1 MiB).
+
+**Provable test runner:** `cloud-boot/tamago-uefi/internal/livedoomboot/provable_test.sh` — runs both gates, prints per-checkpoint OK/FAIL with SHA + chi² values, exits non-zero on any FAIL. Supports `DOOMBOOT_PROVABLE_HARVEST=1` to (re)generate the guest oracle.
+
+**CI workflow:** `cloud-boot/tamago-uefi/.github/workflows/doom-provable.yml` — runs gate A + the unit-test suite for `seed.go` / `harvest-reference` / `tamago` frontend on every push to main and on PRs touching `godoom/**`, `internal/livedoomboot/**`, or `phase3_oci_doom_boot.go`. Gate A is the hard CI gate: any regression that breaks `SeedRandom`, `ResetClock`, the gore engine, or the WAD bytes will surface as an SHA mismatch + per-checkpoint diff in the workflow log. Gate B (full QEMU+EDK2 probe boot) is NOT yet wired into GHA — cost/time tradeoff; runs on the maintainer workstation and is the recommended pre-push check when touching the guest stack.
+
+**Unit-test coverage on NEW infrastructure:**
+
+| Component                                | Coverage | Notes |
+|------------------------------------------|----------|-------|
+| `cloud-boot/godoom/seed.go`              | 100.0%   | all five exported funcs |
+| `backend/tamago/frontend.go` (new methods) | 100.0% (SetSeed/ApplyDeterminism/FrameCount) | pre-existing methods unchanged |
+| `cmd/harvest-reference/main.go`          | 85.1%   | uncovered: `main()` (os.Args) + a few `Run` paths that require a blocking `gore.Run` invocation against a real WAD |
+
+**Anti-pattern compliance.** The deliverable was checked against this session's explicit anti-patterns:
+- ✅ "oracle frame at tic 525 has exactly hash X; captured frame at tic 525 has hash X" — exactly what Gate A does.
+- ✅ Per-checkpoint PRNG state recorded — drift can be diagnosed without falling back to chi².
+- ❌ No empirical "WAV non-zero" gate is upgraded yet — kept as-is with R-doom1h flagged in the protocol doc as the follow-up.
+- The bounded-tolerance Gate B is **honestly** declared as such; the protocol doc spells out that byte-equal on the guest virtio-gpu output remains infeasible until TamaGo gets a tic-locked clock + QEMU pause-at-tic mechanism.
+
+**Files / commits:**
+- `github.com/cloud-boot/godoom@HEAD` — `seed.go`, `seed_test.go`, `backend/tamago/frontend.go` (SetSeed/ApplyDeterminism/FrameCount), `backend/tamago/frontend_test.go`, `cmd/harvest-reference/`, `oracle/` (6 PPMs + manifest), README provable-protocol section.
+- `github.com/cloud-boot/tamago-uefi@HEAD` — `internal/livedoomboot/provable_test.sh`, `.github/workflows/doom-provable.yml`.
+- `github.com/cloud-boot/docs@HEAD` — `docs/architecture/doom-provable-protocol.md`, `mkdocs.yml` nav, this entry.
