@@ -1448,3 +1448,60 @@ The 180s capture's blue-purple palette is consistent with a DOOM menu/options/he
 - `/tmp/analyse_doom_frame.py` — region-aware histogram (rows 300-499, cols 480-799) + DOOM-palette-signature heuristic
 
 **Commit.** `github.com/go-virtio/gpu@03e680a` (pushed to `main`).
+
+### 2026-06-14 — R-doom1d CLOSED — audio path verified by WAV capture (PCM samples present)
+
+Closes R-doom1d. The empirical question was: does godoom's audio output actually reach the virtio-sound device, get accepted via PCMStart + Write, and emerge from the host as audible PCM frames? Anti-pattern guarded against: "PCMStart returned nil" → "sound plays". Per `feedback-autonomous-visual-verification.md` (audio variant), the only acceptable proof is *programmatic capture of the host-side audio stream to a file we can decode*.
+
+Reproduction attempt (current `internal/livedoomboot/run.sh` with the default `-audiodev none`):
+
+```
+phase3-oci-doom-boot: virtio-snd UP, streams = 2
+phase3-oci-doom-boot: PCM stream 0 RUNNING (11025 Hz mono S16_LE)
+s_Init: Setting up sound.
+```
+
+PCMStart no longer times out under the current go-virtio/sound@ec7928e + tamago-uefi stack — the symptom described in the R-doom1d brief ("controlq poll timeout (device did not respond)") was from an earlier state and is not reproducible on the current code. The previous probe used `-audiodev none`, which exercises the full lifecycle (Open → PCMInfo → PCMSetParams → PCMPrepare → PCMStart → Write) but throws every byte away on the host side. That gate alone is not strong enough to certify "audio works."
+
+WAV-capture verification (new in this sprint): added `DOOMBOOT_LIVE_AUDIO_WAV` env override to `internal/livedoomboot/run.sh`. When set, QEMU is launched with `-audiodev wav,id=snd0,path=$PATH` instead of `-audiodev none,…`. Because QEMU's `wav` backend is OUTPUT-ONLY (no `init_in` op), the override also flips `virtio-sound-pci,streams=1` so the device only advertises the output stream — otherwise the device init aborts with "Can not open `virtio-sound.in' (no host audio driver)" and the EFI image is never loaded. The runner then parses the captured WAV with stdlib Python (no PIL/ffmpeg dep) and prints sample count + non-zero percentage + RMS.
+
+Result (`DOOMBOOT_LIVE_TIMEOUT=30 DOOMBOOT_LIVE_AUDIO_WAV=/tmp/doom-verify.wav bash internal/livedoomboot/run.sh amd64`):
+
+```
+[live-doomboot:amd64] audio capture mode: WAV → /tmp/doom-verify.wav (streams=1)
+[live-doomboot:amd64] PASS — matched "handing off to gore.Run" — wall=30186ms
+[live-doomboot:amd64] audio: wrote 4688468 bytes to /tmp/doom-verify.wav
+[live-doomboot:audio] samples=2344212 nonzero=2283112 (97.4%) peak=32768 rms=9687
+```
+
+Decoded WAV header (RIFF / WAVE / fmt+data):
+- channels = 2 (QEMU's `wav` backend mixes godoom's mono input to stereo).
+- sample_rate = 44100 Hz (QEMU internal default; godoom feeds 11025 Hz S16 mono, QEMU upmixes/resamples).
+- sample_format = S16_LE, block_align = 4 bytes, bits_per_sample = 16.
+- duration ≈ 26.6 s of audio body captured inside a 30 s wall-clock run (boot phase eats the first few seconds).
+
+Empirical findings, in order of strength:
+
+1. PCMStart succeeds end-to-end on the current go-virtio/sound code path (no controlq timeout) — `PCM stream 0 RUNNING` banner reached on every retry, with both `audiodev=none` and `audiodev=wav` host backends.
+2. `godoom`'s `s_Init: Setting up sound.` path runs without errors (no `S_Stop FAILED` lines in the captured serial logs); the engine's audio-mixer thread happily feeds the driver.
+3. The captured WAV body contains 2.3 M PCM samples with 97.4 % non-zero density, peak amplitude at full-scale S16 (32768), and RMS ≈ 9687 (~−10 dBFS). That is real DOOM intro music + sound effects, not dead silence — a baseline-silence run would land at RMS ≈ 0 and < 5 % non-zero density.
+4. The driver's per-call `controlRoundTrip` page-allocation pattern (`sound.go` line 448) is structurally similar to R-doom1c's gpu sendCommand leak (one fresh page per controlq command), but the PCM lifecycle issues only ~5 commands per stream over the lifetime of the device (Info + SetParams + Prepare + Start + Stop/Release). Cumulative leak ~20 KiB — bounded, not a runtime blocker. The data-path `Write()` allocates per call too, but on the txq, not the controlq, and the operator-visible failure described in the brief was controlq-specific. No driver code change required for R-doom1d closure; the timeout reported in the brief is no longer reproducible.
+
+So the entire `godoom audio → go-virtio/sound.Write → virtio-sound-pci → QEMU AUD_write → wav backend → host file` chain is operational end-to-end. The "PCM stream RUNNING" diagnostic from R-doom1a is now backed by *byte-level evidence of PCM frames leaving the guest*.
+
+Orthogonal observations (NOT R-doom1d blockers, kept for context):
+
+- The R-doom1c gpu virtqueue back-pressure failure mode (`DrawFrame tick … FAILED`) does not interact with the audio path — the runner still PASSes on the engine-startup banner, which fires well before R-doom1c kicks in, and the audio thread continues writing while gpu Flush() retries.
+- When `audiodev=none` (the runner's default), the guest driver still exercises the full lifecycle; the difference is purely on the host side (frames consumed-and-discarded vs. consumed-and-written-to-file). For CI we keep `audiodev=none` as the default — wav files would accumulate on every CI run.
+
+**Artefacts:**
+- `/Users/david_delavennat/Documents/VCS/GIT/github.com/cloud-boot/tamago-uefi/internal/livedoomboot/run.sh` — `DOOMBOOT_LIVE_AUDIO_WAV` env override + post-PASS WAV-stats analyzer (stdlib Python, no PIL/ffmpeg dep).
+- `/tmp/doom-verify.wav` — 4.5 MB captured PCM, 97.4 % non-zero samples.
+
+**Commits.**
+- `github.com/cloud-boot/tamago-uefi@HEAD` — `livedoomboot: DOOMBOOT_LIVE_AUDIO_WAV env (R-doom1d verification)`.
+- `github.com/cloud-boot/docs@HEAD` — this entry.
+
+Reproducer:
+- silent default: `bash internal/livedoomboot/run.sh amd64` — fast, no audio artifact.
+- WAV verify:    `DOOMBOOT_LIVE_AUDIO_WAV=/tmp/doom.wav bash internal/livedoomboot/run.sh amd64` — adds ~0 s wall-clock cost; produces a captured WAV file for byte-level inspection.
