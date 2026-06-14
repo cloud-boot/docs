@@ -1317,3 +1317,24 @@ The earlier user screenshot of "DrawFrame tick X FAILED" text in their Cocoa win
 **Refined R-doom1c**: the rendering works for the first ~2700 ticks (visible in screendump). The `device returned an error response` errors that follow are still real — investigate the post-2700 ticks state: virtqueue exhaustion / resource ID reuse / command response queue overflow. The QEMU stderr warning `Virtqueue size exceeded` likely fingerprints the failure mechanism.
 
 **Test protocol validation**: the autonomous QMP + Python pixel histogram approach now codified in `feedback-autonomous-visual-verification.md` caught my over-claim AND confirmed the actual rendering state without depending on human observation.
+
+### 2026-06-14 — DOOM rendering timing curve (autonomous, this time the analysis is right)
+
+Captured PPM at 4 timepoints, sampled the centered DOOM canvas region (rows 300-499, cols 480-799 in the 1280x800 framebuffer = 320x200 native DOOM size):
+
+| Time | Engine tick | Failed Flush count | Non-black pixels / 64000 | Distinct chromatic colors |
+|---|---|---|---|---|
+| 12s | 2275 | 0 | 64000 (100%) | 97+ |
+| 30s | 6020 | 0 | 27726 (43%) | 101+ |
+| 60s | 12355 | 69 | 53643 (84%) | 102+ |
+| 90s | 19075 | 261 | 59991 (94%) | 101+ |
+
+The DOOM canvas region has different content at each timepoint (different non-black fill ratios, different chromatic distributions). PPM file hashes also all differ. So:
+- Engine main loop runs continuously (19075 ticks at 90s)
+- Frames update over time
+- Flush errors accumulate (0 → 69 → 261) but are NOT fatal — engine retries, frame updates continue
+- The 'Virtqueue size exceeded' QEMU stderr is a back-pressure signal, not a hard failure
+
+My earlier post-retract analysis was wrong because I sampled the wrong region (first 156 rows of 800, while DOOM's canvas is centered at rows 300-499). The TEST PROTOCOL got the right capture; my ANALYSIS layer had a bug. Memory updated: even after the apparatus is verified, the analysis interpretation needs to match the framebuffer geometry.
+
+**Refined R-doom1c finding**: rendering itself is not broken. The 'failures' are recoverable — the engine produces a steady stream of frames that mostly succeed. R-doom1c is therefore about REDUCING the failure rate (improving virtqueue throughput / fixing the descriptor leak) rather than fixing a hard rendering bug. The next sprint can target the failure rate as a benchmark: failure_count_per_minute at t=60 should approach 0.
