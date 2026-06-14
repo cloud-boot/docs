@@ -1346,3 +1346,58 @@ Tried to fix R-doom1c by caching the sendCommand page (lazy-allocated once, reus
 BUT the change shifts the AllocatePages call count, breaking 10+ failure-injection tests in go-virtio/gpu/gpu3d_*_test.go that use `failPoint{"AllocatePages", N}` to verify error paths. Updating all of them to the new count is the right scope but exceeded the inline budget. Reverted; R-doom1c re-queued as a focused sprint.
 
 Empirical reminder of priority: even with the leak, DOOM still renders for 30+ seconds before the first failure (autonomous timing curve), and failures are recoverable (engine keeps producing frames at 60s/90s with progressively more failures). So this is a polish sprint, not a blocker.
+
+### 2026-06-14 — R-doom1e CLOSED — input propagation verified by QMP send-key + frame divergence
+
+Closes R-doom1e. The empirical question was: does a keystroke injected via QMP `send-key` reach the DOOM engine's input handler and change game state? Anti-pattern guarded against: "no error on key inject" → "key was registered". Per `feedback-autonomous-visual-verification.md`, the only acceptable proof is *frame divergence between a baseline run (no input) and a keypress run (same timeline, same screendump timepoints) at and after the keypress moment*.
+
+Test harness: `tamago-uefi/internal/livedoomboot/verify_input.sh`. Two 60s QEMU runs, identical args (`-vga none`, `-display none`, `-qmp unix:…`, `-serial file:…`), screendumps at t={15, 16, 30, 45, 60}s. Keypress run injects at t=15s: `ret`, `esc`, `down`, `ret`. Histogram is computed on the centered 320×200 canvas (rows 300–499, cols 480–799 of the 1280×800 scanout — same slice as the R-doom1c timing curve). Stdlib-only Python (Counter + struct), no PIL dep. Divergence metric = Pearson chi-square on the union of top-32 chromatic colors plus a Jaccard-style top-5 set delta.
+
+Result (`bash internal/livedoomboot/verify_input.sh amd64`):
+
+```
+time   side        nonblk  distC         top1_rgb top1_n
+----------------------------------------------------------------
+t15    baseline     64000     68   (207, 131, 83)   3344
+t15    keypress     64000     68   (207, 131, 83)   3098
+t15    CHI2/Δ             52.0   top-set Δ=0.00     # pre-keypress noise floor
+
+t16    baseline     64000     68   (207, 131, 83)   3344
+t16    keypress     63331    111   (207, 131, 83)   3098
+t16    CHI2/Δ           6468.6   top-set Δ=0.33     # +1s after keypress
+
+t30    baseline     63900     18       (79, 0, 0)   6091
+t30    keypress     63331    111   (207, 131, 83)   3344
+t30    CHI2/Δ          28199.2   top-set Δ=1.00     # top-5 fully disjoint
+
+t45    baseline     63967     87     (43, 35, 15)   3676
+t45    keypress     59003    106      (23, 15, 7)   2767
+t45    CHI2/Δ          17423.1   top-set Δ=1.00
+
+t60    baseline     64000    131       (90, 4, 4)   8127
+t60    keypress     59162    111      (23, 15, 7)   2831
+t60    CHI2/Δ          73281.0   top-set Δ=1.00
+
+PRE-keypress  chi2 (t15)         = 52.0
+POST-keypress chi2 (max t16-60)  = 73281.0
+POST / PRE ratio                 = 1410.22
+VERDICT=PASS-STRICT
+```
+
+The t=15 chi-square (52.0) is the *natural* run-to-run variance — both runs had identical input history at that point (none). Within one second of the first `ret` injection the chi-square jumps to 6469, the distinct chromatic-color count more than doubles in the keypress run (68 → 111), and by t=30s the top-5 chromatic colors are fully disjoint between baseline and keypress (Jaccard delta = 1.0). The 1410× post/pre ratio cannot be explained by engine non-determinism: the engine *did* see and consume the keystrokes.
+
+Empirical findings, in order of strength:
+
+1. QMP `send-key` correctly delivers a virtio-input event to the guest (otherwise the post-keypress canvas would track baseline).
+2. The `go-virtio/input` driver's `ReadEventRaw` path returns it (otherwise `InputAdapter.Poll` would return `(_, false)` and Frontend.GetKey would see nothing).
+3. `evdevCodeToHIDUsage` maps the codes correctly (KEY_ENTER=28→HID 0x28; KEY_ESC=1→0x29; KEY_DOWN=108→0x51 are all in the table).
+4. The `Frontend.hidUsageToDoomKey` table consumes them and the gore engine reacts (visible state change).
+
+So the entire `QMP → virtio-keyboard-pci → go-virtio/input → InputAdapter → Frontend.GetKey → engine` chain is operational end-to-end. The "input device is UP" diagnostic from R-doom1a is now backed by *frame-level evidence of state transitions*.
+
+Orthogonal observations (NOT R-doom1e blockers, kept for context):
+
+- R-doom1c failure mode is still present in both runs (`DrawFrame tick … FAILED` after ~30s); identical baseline and keypress engine tick rates rule out input-handling overhead as a cause.
+- The keypress canvas at t=45/60 shows a darker palette (top color (23,15,7) — near-black brown) than the baseline (43,35,15 / 90,4,4) — consistent with the engine being on a menu/option screen vs. the demo intro flame animation. We did not need to identify the screen to prove propagation; chi-square + Jaccard already discriminate.
+
+Reproducer: `DOOMBOOT_LIVE_KEEPRUN=1 bash internal/livedoomboot/verify_input.sh amd64`. Keeps PPMs + serial logs in `/var/folders/.../cloudboot-doomboot-verify-*` and the QMP sockets in `/tmp/doomb.*` for post-hoc inspection. Wall-clock cost: ~140 s (2 × 60 s QEMU + boot + analysis).
