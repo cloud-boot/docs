@@ -1338,3 +1338,11 @@ The DOOM canvas region has different content at each timepoint (different non-bl
 My earlier post-retract analysis was wrong because I sampled the wrong region (first 156 rows of 800, while DOOM's canvas is centered at rows 300-499). The TEST PROTOCOL got the right capture; my ANALYSIS layer had a bug. Memory updated: even after the apparatus is verified, the analysis interpretation needs to match the framebuffer geometry.
 
 **Refined R-doom1c finding**: rendering itself is not broken. The 'failures' are recoverable — the engine produces a steady stream of frames that mostly succeed. R-doom1c is therefore about REDUCING the failure rate (improving virtqueue throughput / fixing the descriptor leak) rather than fixing a hard rendering bug. The next sprint can target the failure rate as a benchmark: failure_count_per_minute at t=60 should approach 0.
+
+### 2026-06-14 — R-doom1c fix attempted, reverted (test scope larger than inline budget)
+
+Tried to fix R-doom1c by caching the sendCommand page (lazy-allocated once, reused thereafter) in go-virtio/gpu. The fix itself is small (~25 LOC) and conceptually sound: the synchronous send/poll/reclaim contract means only one command is ever in flight, so the per-call AllocatePages was a pure 4 KiB / call leak. DOOM's 35 Hz × 2-cmd Flush = ~280 KiB/s firmware EfiBootServicesData leak.
+
+BUT the change shifts the AllocatePages call count, breaking 10+ failure-injection tests in go-virtio/gpu/gpu3d_*_test.go that use `failPoint{"AllocatePages", N}` to verify error paths. Updating all of them to the new count is the right scope but exceeded the inline budget. Reverted; R-doom1c re-queued as a focused sprint.
+
+Empirical reminder of priority: even with the leak, DOOM still renders for 30+ seconds before the first failure (autonomous timing curve), and failures are recoverable (engine keeps producing frames at 60s/90s with progressively more failures). So this is a polish sprint, not a blocker.
