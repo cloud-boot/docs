@@ -1,0 +1,43 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs Material + mike
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure git for mike
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # mike publishes versioned docs to the gh-pages branch; GitHub Pages serves
+      # that branch at https://cloud-boot.github.io/docs/. The version label
+      # tracks main as "0.1" aliased "latest"; tag-driven versions can be added
+      # later. /docs/ redirects to the default ("latest").
+      - name: Deploy versioned docs
+        run: |
+          git fetch origin gh-pages --depth=1 || true
+          mike deploy --push --update-aliases 0.1 latest
+          mike set-default --push latest
