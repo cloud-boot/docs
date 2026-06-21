@@ -1,0 +1,3193 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Boot unmodified cloud images on KVM/QEMU, Apple Virtualization.framework, and OpenStack — six Linux families, three BSDs, Windows via DevicePath handoff. UEFI + TinyGo + pure-Go filesystem drivers, no kexec required.">
+      
+      
+        <meta name="author" content="cloud-boot contributors">
+      
+      
+        <link rel="canonical" href="https://cloud-boot.github.io/docs/0.1/architecture/quake-roadmap/">
+      
+      
+        <link rel="prev" href="../doom-provable-protocol/">
+      
+      
+        <link rel="next" href="../../filesystems/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Quake roadmap (DOOM → Q1 → Q2 → Q3) - cloud-boot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="cyan">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#quake-roadmap-from-doom-phase-3-to-quake-on-bare-metal" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="cloud-boot" class="md-header__button md-logo" aria-label="cloud-boot" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            cloud-boot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Quake roadmap (DOOM → Q1 → Q2 → Q3)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="cyan"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="cyan"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="cyan"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/cloud-boot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    cloud-boot/cloud-boot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../filesystems/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Filesystem drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Internals
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="cloud-boot" class="md-nav__button md-logo" aria-label="cloud-boot" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    cloud-boot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/cloud-boot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    cloud-boot/cloud-boot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../three-paths/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Three boot paths
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../components/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Components
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hypervisors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hypervisor matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tamago-uefi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TamaGo UEFI (Path D)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../phase3-multi-os-oci-boot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Phase 3 — OS-agnostic OCI boot
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../doom-provable-protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DOOM provable test protocol (R-doom1g)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quake roadmap (DOOM → Q1 → Q2 → Q3)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quake roadmap (DOOM → Q1 → Q2 → Q3)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-goal-and-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §1 — Goal and non-goals
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§1 — Goal and non-goals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#goal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Goal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-quake-ie-what-does-it-prove-that-doom-does-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Quake (i.e. what does it prove that DOOM does not)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#non-goals-v1-of-this-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-goals (v1 of this roadmap)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-survey-of-pure-go-quake-ports-research" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §2 — Survey of pure-Go Quake ports (research)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§2 — Survey of pure-Go Quake ports (research)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quake-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#quake-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#quake-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#summary-of-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary of §2
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-per-game-gap-analysis-cloud-boot-stack-vs-quake-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §3 — Per-game gap analysis (cloud-boot stack vs Quake requirements)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§3 — Per-game gap analysis (cloud-boot stack vs Quake requirements)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-game-gap-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-game gap matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-gl-gap-called-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The GL gap, called out
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-recommended-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §4 — Recommended sequence
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§4 — Recommended sequence">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-1a-quake-1-software-renderer-single-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-1a — Quake 1 software renderer, single map
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-1b-quake-1-gl-renderer-virgl-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-1b — Quake 1 GL renderer (virgl path)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-mouse-virtio-input-mouse-bring-up" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-mouse — virtio-input mouse bring-up
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-2-quake-2-soft-gl-via-shim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-2 — Quake 2 (soft + GL via shim)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-3-quake-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-3 — Quake 3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-mp-multiplayer-any-of-q1q2q3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-MP — multiplayer (any of Q1/Q2/Q3)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-ladder-visually" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase ladder, visually
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-first-sprint-scoping-doom-works-q1-soft-renders-one-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §5 — First-sprint scoping ("DOOM works → Q1-soft renders one map")
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§5 — First-sprint scoping (&#34;DOOM works → Q1-soft renders one map&#34;)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-is-hard-about-q-1a-honest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is hard about Q-1a (honest)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-open-questions-user-decisions-before-work-starts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §6 — Open questions (user decisions before work starts)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#appendix-a-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Appendix A — References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../filesystems/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filesystem drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Filesystem drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/ext4/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ext4
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/xfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    XFS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/btrfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    btrfs (incl. RAID)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/zfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ZFS (incl. RAID-Z)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/luks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LUKS (full-disk encryption)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../filesystems/raid/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-device discovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../tutorials/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/qemu/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart - QEMU/KVM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/vfkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart - Apple VZ (vfkit)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/openstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenStack with Keystone AC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/multi-arch-iso/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-arch ISO (x86_64 + arm64 + riscv64)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cmdline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kernel cmdline (cloudboot.*)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/plan-hcl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plan HCL schema
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/metadata-url/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    metadata-URL JSON
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/bsd-targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BSD targets (FreeBSD/NetBSD/OpenBSD)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/windows-target/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows target
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/nvram-reset/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NVRAM reset
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../internals/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/on-disk-formats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    On-disk format fixes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/multi-device-btrfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    btrfs multi-device routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/multi-vdev-zfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ZFS multi-vdev + RAID-Z
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/vdev-tree-nvlist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vdev label NVList
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-goal-and-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §1 — Goal and non-goals
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§1 — Goal and non-goals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#goal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Goal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-quake-ie-what-does-it-prove-that-doom-does-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Quake (i.e. what does it prove that DOOM does not)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#non-goals-v1-of-this-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-goals (v1 of this roadmap)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-survey-of-pure-go-quake-ports-research" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §2 — Survey of pure-Go Quake ports (research)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§2 — Survey of pure-Go Quake ports (research)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quake-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#quake-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#quake-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quake 3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#summary-of-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary of §2
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-per-game-gap-analysis-cloud-boot-stack-vs-quake-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §3 — Per-game gap analysis (cloud-boot stack vs Quake requirements)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§3 — Per-game gap analysis (cloud-boot stack vs Quake requirements)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-game-gap-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-game gap matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-gl-gap-called-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The GL gap, called out
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-recommended-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §4 — Recommended sequence
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§4 — Recommended sequence">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-1a-quake-1-software-renderer-single-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-1a — Quake 1 software renderer, single map
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-1b-quake-1-gl-renderer-virgl-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-1b — Quake 1 GL renderer (virgl path)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-mouse-virtio-input-mouse-bring-up" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-mouse — virtio-input mouse bring-up
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-2-quake-2-soft-gl-via-shim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-2 — Quake 2 (soft + GL via shim)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-3-quake-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-3 — Quake 3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-q-mp-multiplayer-any-of-q1q2q3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase Q-MP — multiplayer (any of Q1/Q2/Q3)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#phase-ladder-visually" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Phase ladder, visually
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-first-sprint-scoping-doom-works-q1-soft-renders-one-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §5 — First-sprint scoping ("DOOM works → Q1-soft renders one map")
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="§5 — First-sprint scoping (&#34;DOOM works → Q1-soft renders one map&#34;)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-is-hard-about-q-1a-honest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is hard about Q-1a (honest)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-open-questions-user-decisions-before-work-starts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        §6 — Open questions (user decisions before work starts)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#appendix-a-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Appendix A — References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!--
+SPDX-License-Identifier: BSD-3-Clause
+Copyright (c) 2026 The cloud-boot/docs authors
+-->
+
+<h1 id="quake-roadmap-from-doom-phase-3-to-quake-on-bare-metal">Quake roadmap — from DOOM (Phase 3) to Quake on bare metal<a class="headerlink" href="#quake-roadmap-from-doom-phase-3-to-quake-on-bare-metal" title="Permanent link">#</a></h1>
+<p><strong>Status:</strong> Draft v1 (2026-06-14). Forward-looking planning document.
+The DOOM Phase 3 demo is the baseline ("184 OK / 0 FAILED frames at
+640x400 over 50 s on Apple Silicon under QEMU+TCG", see
+<a href="../doom-provable-protocol/">DOOM provable protocol</a>). Everything below
+is what comes next.</p>
+<p>This document is a roadmap, not a design spec. It is meant to be
+technically grounded enough that a contributor could start work
+tomorrow from §5; it explicitly avoids prescribing implementation
+detail beyond that.</p>
+<hr />
+<h2 id="1-goal-and-non-goals">§1 — Goal and non-goals<a class="headerlink" href="#1-goal-and-non-goals" title="Permanent link">#</a></h2>
+<h3 id="goal">Goal<a class="headerlink" href="#goal" title="Permanent link">#</a></h3>
+<p>Boot id Software's Quake series (Q1 → Q2 → Q3) on bare metal under
+the same TamaGo-UEFI runtime that runs the DOOM Phase 3 demo today,
+using only the existing pure-Go go-virtio device stack as its
+window-on-the-world. No CGO, no syscalls, no host OS.</p>
+<h3 id="why-quake-ie-what-does-it-prove-that-doom-does-not">Why Quake (i.e. what does it prove that DOOM does not)<a class="headerlink" href="#why-quake-ie-what-does-it-prove-that-doom-does-not" title="Permanent link">#</a></h3>
+<p>DOOM is a 2D-only sector engine: every frame is a 320x200 8-bit
+palette buffer that the engine paints with a software span renderer
+and the cloud-boot frontend BGRA-converts into the virtio-gpu
+scanout. The whole rendering pipeline lives on the guest CPU; the
+host GPU does nothing more than <code>RESOURCE_FLUSH</code>. That validates:
+2D scanout, AttachBacking, the controlq, virtio-sound at 11025 Hz
+mono, virtio-input keyboard. It does <strong>not</strong> validate:</p>
+<table>
+<thead>
+<tr>
+<th>Capability that DOOM does NOT exercise</th>
+<th>Why Quake exercises it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3D triangle rasterisation</td>
+<td>Q1+ are polygon engines; even Q1 soft renderer uses 3D math + spans-of-triangles</td>
+</tr>
+<tr>
+<td>Host-accelerated GL (virgl)</td>
+<td>Q1-GL / Q2-GL / Q3 all assume a real OpenGL implementation on the other side</td>
+</tr>
+<tr>
+<td>Texture upload pressure (BSP lightmaps + skins)</td>
+<td>Quake levels carry MiBs of textures vs DOOM's WAD-resident graphics</td>
+</tr>
+<tr>
+<td>Floating-point hot path</td>
+<td>Q1's R_DrawSpan is integer; Q2+ matrix math is float — exercises FPU under TamaGo</td>
+</tr>
+<tr>
+<td>Mouse input</td>
+<td>Quake is unplayable on keyboard alone; forces virtio-input mouse bring-up</td>
+</tr>
+<tr>
+<td>Higher audio mix density</td>
+<td>Q2/Q3 mix many simultaneous voices vs DOOM's 8-channel SFX</td>
+</tr>
+<tr>
+<td>UDP networking (multiplayer)</td>
+<td>Q1/Q2/Q3 all use UDP; would prove a guest UDP stack on bare metal over virtio-net</td>
+</tr>
+<tr>
+<td>Filesystem density (PAK + nested files)</td>
+<td>DOOM has a single WAD; Quake PAKs have hundreds of nested resources</td>
+</tr>
+</tbody>
+</table>
+<p>Crucially, Q1 has both a software renderer (CPU-only, validates the
+"DOOM stack still works at higher complexity" claim) <strong>and</strong> a GL
+renderer (validates the virgl path end-to-end with a real, non-toy
+workload). That ladder is the load-bearing reason Q1 is the right
+next rung after DOOM.</p>
+<h3 id="non-goals-v1-of-this-roadmap">Non-goals (v1 of this roadmap)<a class="headerlink" href="#non-goals-v1-of-this-roadmap" title="Permanent link">#</a></h3>
+<ul>
+<li><strong>Multiplayer.</strong> UDP requires a guest TCP/IP-class stack on bare
+  metal; that is its own multi-sprint workstream and is deferred to
+  R-quake-MP.</li>
+<li><strong>Q3 from day one.</strong> Q3 is GL-only and shader-heavy; even with a
+  working Q1-GL bring-up it is a separate phase, not a sprint
+  extension.</li>
+<li><strong>Sound music (CD-audio / MIDI / OGG).</strong> SFX only, same as DOOM.</li>
+<li><strong>Real-time perf parity with ironwail.</strong> A 15-20 FPS bare-metal
+  demo on TCG is acceptable for v1; KVM-accelerated perf is a
+  separate gate.</li>
+<li><strong>Mods, custom maps, custom games.</strong> Vanilla shareware/demo PAKs
+  only.</li>
+</ul>
+<hr />
+<h2 id="2-survey-of-pure-go-quake-ports-research">§2 — Survey of pure-Go Quake ports (research)<a class="headerlink" href="#2-survey-of-pure-go-quake-ports-research" title="Permanent link">#</a></h2>
+<p>This is the most load-bearing section: the rest of the plan
+collapses if a usable upstream exists (we fork it) or expands
+considerably if none does (we transpile from C or write from
+scratch).</p>
+<h3 id="quake-1">Quake 1<a class="headerlink" href="#quake-1" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Project</th>
+<th>Scope</th>
+<th>License</th>
+<th>Pure Go?</th>
+<th>State (2026-06)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/darkliquid/ironwail-go"><code>darkliquid/ironwail-go</code></a></td>
+<td><strong>Full client</strong> port of ironwail (QuakeSpasm fork)</td>
+<td>GPL-2.0</td>
+<td>Yes (CGO=0 stated goal; uses gogpu)</td>
+<td><strong>Active</strong>, 816 commits, "100% behavioral parity" target; AI-assisted; renders maps via <code>mise run smoke-map-start</code>; unreviewed by upstream Ironwail authors</td>
+</tr>
+<tr>
+<td><a href="https://github.com/matttproud/go-quake"><code>matttproud/go-quake</code></a></td>
+<td>Quake I <strong>server only</strong>, NetQuake protocol</td>
+<td>Apache-2.0</td>
+<td>Yes</td>
+<td>Stub; explicitly "INCOMPLETE"; 12 commits; useful only as a protocol reference</td>
+</tr>
+<tr>
+<td><code>id-Software/Quake</code> (upstream C) → <code>ccgo</code> transpile</td>
+<td>Full client</td>
+<td>GPL-2.0</td>
+<td>After transpile, generated Go (no CGO)</td>
+<td>Hypothetical; same approach gore used on doomgeneric</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Finding:</strong> <code>ironwail-go</code> is the only pure-Go Quake 1 client that
+actually loads and renders a level. It is GPL-2.0, which is
+compatible with cloud-boot's fork-then-isolate pattern (godoom
+already follows it: GPL boundary preserved by living in its own
+subrepo, BSD-3 wrappers everywhere else). Its dependence on <code>gogpu</code>
+is the key technical risk — see §3.</p>
+<h3 id="quake-2">Quake 2<a class="headerlink" href="#quake-2" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Project</th>
+<th>Scope</th>
+<th>License</th>
+<th>Pure Go?</th>
+<th>State (2026-06)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/samuelyuan/go-quake2"><code>samuelyuan/go-quake2</code></a></td>
+<td><strong>Map renderer only</strong> — loads BSP + textures, no game loop</td>
+<td>MIT</td>
+<td>No (uses go-gl + GLFW, CGO)</td>
+<td>44 commits; useful only as a BSP-loader reference</td>
+</tr>
+<tr>
+<td><a href="https://github.com/packetflinger/q2master"><code>packetflinger/q2master</code></a></td>
+<td>Q2 master server</td>
+<td>Likely GPL</td>
+<td>Yes</td>
+<td>Active; protocol reference only</td>
+</tr>
+<tr>
+<td><code>id-Software/quake2</code> (upstream C) → <code>ccgo</code> transpile</td>
+<td>Full client</td>
+<td>GPL-2.0</td>
+<td>After transpile</td>
+<td>Hypothetical</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Finding:</strong> <strong>No pure-Go Quake 2 client exists.</strong> The closest
+artefact is a CGO+OpenGL BSP viewer that does not run gameplay.
+Q2 thus requires either (a) a fresh <code>ccgo</code> transpile of upstream
+yquake2/q2pro (analogous to how gore was produced from
+doomgeneric) or (b) an AI-assisted hand port in the
+ironwail-go style. Either is L-tier effort.</p>
+<h3 id="quake-3">Quake 3<a class="headerlink" href="#quake-3" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Project</th>
+<th>Scope</th>
+<th>License</th>
+<th>Pure Go?</th>
+<th>State (2026-06)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://pkg.go.dev/github.com/icedream/go-q3net"><code>icedream/go-q3net</code></a></td>
+<td>Q3 wire <strong>protocol library</strong> only (Writer / Header / Message / OOB)</td>
+<td>GPL-2.0+</td>
+<td>Yes</td>
+<td>WIP; protocol reference only</td>
+</tr>
+<tr>
+<td><code>criticalstack/quake-kube</code></td>
+<td>Kubernetes orchestration around ioq3 binary</td>
+<td>Apache-2.0</td>
+<td>Yes (orchestration)</td>
+<td>Orchestrates a C binary; not a Go engine</td>
+</tr>
+<tr>
+<td><a href="https://github.com/0xBrsm/NexQuake"><code>0xBrsm/NexQuake</code></a></td>
+<td>Browser + relay stack; engine is <strong>C compiled to WASM</strong></td>
+<td>Mixed</td>
+<td>No (engine is C-WASM)</td>
+<td>Active 2026; the Go is a relay, not the engine</td>
+</tr>
+<tr>
+<td><code>ioquake/ioq3</code> (upstream C) → <code>ccgo</code> transpile</td>
+<td>Full client</td>
+<td>GPL-2.0</td>
+<td>After transpile</td>
+<td>Hypothetical</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Finding:</strong> <strong>No pure-Go Quake 3 client exists, even as a stub.</strong>
+Every Q3-in-Go artefact in the wild is either a protocol shim or a
+relay/orchestrator around the original C binary. NexQuake is the
+shape Q3 takes today in a "Go ecosystem" context — but its engine
+is unmodified C running in WASM, which doesn't help a bare-metal
+TamaGo runtime that has no JS/WASM host.</p>
+<h3 id="summary-of-2">Summary of §2<a class="headerlink" href="#summary-of-2" title="Permanent link">#</a></h3>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Q1: ironwail-go exists, GPL-2.0, pure Go, depends on gogpu (PURE GO WebGPU framework with a software-renderer mode)
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>Q2: NOTHING usable. Must transpile or port.
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>Q3: NOTHING usable. Must transpile or port. Much harder than Q2 (shader-heavy GL3 pipeline).
+</span></code></pre></div>
+<p>This single result reshapes the plan: Q1 is "fork + integrate";
+Q2 and Q3 are "build the upstream first, then integrate".</p>
+<hr />
+<h2 id="3-per-game-gap-analysis-cloud-boot-stack-vs-quake-requirements">§3 — Per-game gap analysis (cloud-boot stack vs Quake requirements)<a class="headerlink" href="#3-per-game-gap-analysis-cloud-boot-stack-vs-quake-requirements" title="Permanent link">#</a></h2>
+<p>What the current cloud-boot / go-virtio stack already provides
+(2026-06-14):</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Where</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2D BGRA scanout</td>
+<td><code>go-virtio/gpu.SetupFramebuffer</code>/<code>Flush</code></td>
+<td>Validated 100% cov, real device</td>
+</tr>
+<tr>
+<td>3D virgl context + clear</td>
+<td><code>go-virtio/gpu.OpenVirtioGPU3D</code>/<code>ClearScreen</code></td>
+<td>Validated (M1); hand-encoded virgl, no Mesa</td>
+</tr>
+<tr>
+<td>soft3d (pure-Go raster)</td>
+<td><code>go-virtio/gpu/soft3d/soft3d.go</code> (385 LoC)</td>
+<td>Triangle + textured triangle only; <strong>not</strong> a renderer suitable for a real engine</td>
+</tr>
+<tr>
+<td>Venus (Vulkan-over-virtio)</td>
+<td><code>go-virtio/venus</code></td>
+<td>Infrastructure + pixel readback validated</td>
+</tr>
+<tr>
+<td>Audio (11025 Hz mono S16)</td>
+<td><code>go-virtio/sound</code></td>
+<td>DOOM SFX path validated</td>
+</tr>
+<tr>
+<td>Keyboard (HID)</td>
+<td><code>go-virtio/input</code></td>
+<td>DOOM keymap validated</td>
+</tr>
+<tr>
+<td>Mouse</td>
+<td>n/a</td>
+<td><strong>GAP</strong> — <code>go-virtio/input</code> device is keyboard-only on the demo path</td>
+</tr>
+<tr>
+<td>Network L2 frames</td>
+<td><code>go-virtio/net</code></td>
+<td>Header/buffer/TX/RX; no IP, no UDP</td>
+</tr>
+<tr>
+<td>UDP / TCP stack</td>
+<td>n/a</td>
+<td><strong>GAP</strong> — <code>gvisor-tap-vsock</code> is the leading candidate but not yet wired</td>
+</tr>
+<tr>
+<td>Embedded WAD/PAK FS</td>
+<td><code>cloud-boot/godoom/embedwad</code></td>
+<td>Pattern reusable for PAK0/PAK1</td>
+</tr>
+</tbody>
+</table>
+<h3 id="per-game-gap-matrix">Per-game gap matrix<a class="headerlink" href="#per-game-gap-matrix" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Q1 (soft)</th>
+<th>Q1 (GL)</th>
+<th>Q2 (soft)</th>
+<th>Q2 (GL)</th>
+<th>Q3 (GL3)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2D scanout (final blit)</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+</tr>
+<tr>
+<td>3D triangle rasterisation</td>
+<td>engine does it on CPU; we just blit</td>
+<td>OK (host GPU)</td>
+<td>engine does it on CPU; we just blit</td>
+<td>OK (host GPU)</td>
+<td>n/a (no soft renderer)</td>
+</tr>
+<tr>
+<td>OpenGL ≤1.2 (immediate mode)</td>
+<td>n/a</td>
+<td><strong>needs virgl + Mesa-shaped command stream</strong></td>
+<td>n/a</td>
+<td><strong>needs virgl + Mesa-shaped command stream</strong></td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>OpenGL 2.x+ (shaders, VBOs)</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a</td>
+<td><strong>GAP</strong> — virgl can carry it but we have hand-encoded clears only</td>
+</tr>
+<tr>
+<td>Vulkan</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a (no Q3-Vulkan)</td>
+</tr>
+<tr>
+<td>Audio (SFX mixer)</td>
+<td>OK (same shape as DOOM)</td>
+<td>OK</td>
+<td>needs more voices but same shape</td>
+<td>same</td>
+<td>OpenAL-shaped, heavier</td>
+</tr>
+<tr>
+<td>Keyboard</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+</tr>
+<tr>
+<td>Mouse</td>
+<td><strong>GAP</strong></td>
+<td><strong>GAP</strong></td>
+<td><strong>GAP</strong></td>
+<td><strong>GAP</strong></td>
+<td><strong>GAP</strong></td>
+</tr>
+<tr>
+<td>UDP (multiplayer)</td>
+<td>non-goal v1</td>
+<td>non-goal v1</td>
+<td>non-goal v1</td>
+<td>non-goal v1</td>
+<td>non-goal v1</td>
+</tr>
+<tr>
+<td>PAK filesystem</td>
+<td><strong>embed pattern from godoom</strong></td>
+<td>same</td>
+<td>same</td>
+<td>same</td>
+<td>same</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-gl-gap-called-out">The GL gap, called out<a class="headerlink" href="#the-gl-gap-called-out" title="Permanent link">#</a></h3>
+<p>This is the dominant technical risk. The go-virtio/gpu 3D path is
+end-to-end validated for <code>ClearScreen</code> only — a 3-command virgl
+buffer (<code>CREATE SURFACE</code> + <code>SET_FRAMEBUFFER_STATE</code> + <code>CLEAR</code>). An
+actual GL program (even Q1-GL's fixed-function pipeline) demands
+hundreds of distinct virgl opcodes plus the equivalent of a Mesa
+state tracker on the guest side to turn <code>glBegin / glVertex /
+glTexCoord</code> into a virgl command stream. That state tracker does
+not exist in pure Go anywhere we have found.</p>
+<p>Three plausible routes through this:</p>
+<ol>
+<li><strong>soft3d-only:</strong> target Q1-software exclusively, never engage
+   the host GPU. Avoids the whole problem. Caps us at ~Q1
+   performance forever; doesn't validate virgl on a real workload.</li>
+<li><strong>Borrow a Go state tracker.</strong> <code>gogpu/wgpu</code> is a pure-Go WebGPU
+   implementation that already targets multiple backends (Vulkan,
+   D3D12, Metal, GLES, software). If we can route its software
+   backend's command stream into a "virgl-shim" backend, we get a
+   GL-class pipeline. This is precisely what <code>ironwail-go</code> does;
+   the architectural fit is real.</li>
+<li><strong>Hand-extend gpu3d.</strong> Encode each GL call we need as a virgl
+   opcode pair (<code>SUBMIT_3D</code> + the payload). Tractable for Q1-GL
+   (a few dozen distinct draw shapes); painful for Q2; impossible
+   in human time for Q3.</li>
+</ol>
+<p>The recommended sequence in §4 picks routes 1 → 2 in stages.</p>
+<hr />
+<h2 id="4-recommended-sequence">§4 — Recommended sequence<a class="headerlink" href="#4-recommended-sequence" title="Permanent link">#</a></h2>
+<p>A phased plan, smallest first. Each phase has prerequisites,
+effort tier (S = 1-2 weeks, M = 1 month, L = 2-3 months, XL = quarter+),
+and a validation criterion in the shape of the DOOM provable
+protocol where possible.</p>
+<h3 id="phase-q-1a-quake-1-software-renderer-single-map">Phase Q-1a — Quake 1 software renderer, single map<a class="headerlink" href="#phase-q-1a-quake-1-software-renderer-single-map" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>None beyond Phase 3 DOOM stack</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>M</strong> (1 month)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Boot <code>e1m1</code>, render 35 tics from a fixed start; tic-N framebuffer matches a host-side oracle (byte-equal on host, chi^2-bounded on guest); same shape as R-doom1g</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>ironwail-go integration friction; PAK embed; mouse-not-needed-yet (turn <code>+mlook 0</code>); pure-soft renderer choice means ignoring <code>gogpu</code>'s WebGPU path</td>
+</tr>
+<tr>
+<td>Output</td>
+<td><code>cloud-boot/tamago-uefi/phaseQ1_oci_quake1_soft_boot.go</code> analogous to <code>phase3_oci_doom_boot.go</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-q-1b-quake-1-gl-renderer-virgl-path">Phase Q-1b — Quake 1 GL renderer (virgl path)<a class="headerlink" href="#phase-q-1b-quake-1-gl-renderer-virgl-path" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>Q-1a; <strong>plus</strong> gogpu's software backend wired into a "virgl shim" GL-class output</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>L</strong> (2-3 months)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Same oracle as Q-1a but on the GL renderer; guest chi^2 vs guest oracle; first end-to-end proof that virgl works on a real workload</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>The virgl shim is the load-bearing unknown; if hand-encoding draws turns out to need ~Mesa-tier complexity, fall back to Q-1a indefinitely</td>
+</tr>
+<tr>
+<td>Output</td>
+<td><code>phaseQ1gl_oci_quake1_gl_boot.go</code> + a <code>go-virtio/gpu/virglshim/</code> subpackage</td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-q-mouse-virtio-input-mouse-bring-up">Phase Q-mouse — virtio-input mouse bring-up<a class="headerlink" href="#phase-q-mouse-virtio-input-mouse-bring-up" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>None (parallel to Q-1a/Q-1b)</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>S</strong> (1-2 weeks)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>A scripted mouse-delta event sequence steers the player; guest scanout at tic N matches the oracle frame produced under the same script</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>Low — virtio-input already drives keyboard; mouse is the same wire shape with a different evdev code stream</td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-q-2-quake-2-soft-gl-via-shim">Phase Q-2 — Quake 2 (soft + GL via shim)<a class="headerlink" href="#phase-q-2-quake-2-soft-gl-via-shim" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>Q-1b; <strong>plus</strong> a Pure-Go Q2 engine (transpile of yquake2/q2pro with <code>ccgo</code>, or AI-assisted hand port). This sub-project is itself L-tier.</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>XL</strong> (quarter)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Same oracle shape; first map (<code>base1</code>) renders 70 tics within tolerance</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>Q2 engine does not exist; whichever route we take for §2 produces our most expensive dependency</td>
+</tr>
+<tr>
+<td>Output</td>
+<td><code>cloud-boot/goquake2</code> (analogous to <code>cloud-boot/godoom</code>) + <code>phaseQ2_oci_quake2_boot.go</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-q-3-quake-3">Phase Q-3 — Quake 3<a class="headerlink" href="#phase-q-3-quake-3" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>Q-2; <strong>plus</strong> a Pure-Go Q3 engine (no upstream exists; <code>ccgo</code> of ioq3 is the only realistic route); <strong>plus</strong> the virgl shim must reach GL2-shader-class capability</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>XL</strong> (quarter+)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Boot <code>q3dm1</code>, render demo loop, byte-equal-on-host / chi^2 on guest at checkpoint tics</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>Triple-stacked: untranspiled engine, untested shader-class virgl path, much higher texture/audio pressure. Honest assessment: don't promise dates until Q-2 lands</td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-q-mp-multiplayer-any-of-q1q2q3">Phase Q-MP — multiplayer (any of Q1/Q2/Q3)<a class="headerlink" href="#phase-q-mp-multiplayer-any-of-q1q2q3" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prerequisites</td>
+<td>Guest UDP stack on bare metal over virtio-net (gvisor-tap-vsock is the leading candidate per the weft project notes)</td>
+</tr>
+<tr>
+<td>Effort</td>
+<td><strong>L</strong> (separate workstream)</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Out of scope for v1 of this roadmap</td>
+</tr>
+</tbody>
+</table>
+<h3 id="phase-ladder-visually">Phase ladder, visually<a class="headerlink" href="#phase-ladder-visually" title="Permanent link">#</a></h3>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>DOOM (done) ──&gt; Q-1a (soft) ──&gt; Q-1b (GL via virgl shim) ──&gt; Q-2 (soft+GL) ──&gt; Q-3
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>                    │                                               │
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>                    └── Q-mouse (parallel, S)                       └── Q-MP (parallel, L)
+</span></code></pre></div>
+<hr />
+<h2 id="5-first-sprint-scoping-doom-works-q1-soft-renders-one-map">§5 — First-sprint scoping ("DOOM works → Q1-soft renders one map")<a class="headerlink" href="#5-first-sprint-scoping-doom-works-q1-soft-renders-one-map" title="Permanent link">#</a></h2>
+<p>This is the concrete work for Phase Q-1a, in dependency order. The
+target is e1m1 rendering 35 tics matched against a host oracle.</p>
+<ol>
+<li>
+<p><strong>Decide the engine fork.</strong> Smoke-build <code>darkliquid/ironwail-go</code>
+   off a <code>CGO_ENABLED=0 GOOS=linux</code> Go toolchain. Confirm it (a)
+   compiles without any C dependency and (b) renders e1m1 to a
+   file-backed framebuffer. If yes, fork into
+   <code>github.com/cloud-boot/goquake1</code> (GPL-2.0 preserved, same
+   convention as godoom). If no, fall back to a <code>ccgo</code> transpile
+   of WinQuake.</p>
+</li>
+<li>
+<p><strong>Force the software renderer.</strong> Disable the gogpu/WebGPU
+   default path; we only want the CPU span renderer for Q-1a.
+   Confirm the engine still boots a map.</p>
+</li>
+<li>
+<p><strong>Define a frontend interface mirroring <code>gore.DoomFrontend</code>.</strong>
+   Mechanical shape: <code>DrawFrame(*image.RGBA)</code>, <code>PlaySound(...)</code>,
+   <code>GetEvent(*Event) bool</code>, plus the determinism hooks (<code>SetSeed</code>,
+   <code>ApplyDeterminism</code>, <code>FrameCount</code>) that R-doom1g already
+   established as the contract for the provable protocol. Put it
+   under <code>cloud-boot/goquake1/backend/tamago/frontend.go</code>.</p>
+</li>
+<li>
+<p><strong>PAK embed.</strong> Lift the <code>cloud-boot/godoom/embedwad/</code> pattern.
+   Drop <code>pak0.pak</code> (shareware/demo) under
+   <code>cloud-boot/goquake1/embedpak/pak0.pak</code> behind an <code>embedpak</code>
+   build tag; expose <code>embedpak.PAK0() []byte</code>.</p>
+</li>
+<li>
+<p><strong>Wire the frontend's GPU adapter.</strong> Same shape as
+   <code>godoom.GPUAdapter</code>: take the BGRA framebuffer the engine
+   produces (Quake's soft renderer outputs an 8-bit palette
+   buffer; the palette-to-BGRA conversion runs in the adapter,
+   exactly like DOOM's), copy into the <code>go-virtio/gpu</code> device
+   backing, <code>Flush()</code>.</p>
+</li>
+<li>
+<p><strong>Wire the frontend's sound adapter.</strong> Quake SFX is 11025 Hz
+   mono 8-bit unsigned — identical to DOOM's dmx format. The
+   <code>soundWriteShim</code> from <code>phase3_oci_doom_boot.go</code> is reusable
+   verbatim; only the upload pipeline changes (PAK lump enumeration
+   instead of WAD).</p>
+</li>
+<li>
+<p><strong>Wire the frontend's input adapter.</strong> Quake needs WASD + mouse;
+   for Q-1a we punt mouse to Q-mouse and bind W/A/S/D + Space +
+   Ctrl + Esc + Enter via the existing HID-usage shim. <code>+mlook 0</code>
+   in the autoexec to disable mouse-look.</p>
+</li>
+<li>
+<p><strong>Add the probe.</strong> <code>phaseQ1_oci_quake1_soft_boot.go</code> analogous
+   to <code>phase3_oci_doom_boot.go</code>: PCI scan for the same three
+   virtio devices, pre-detach EDK2 auto-bound drivers, build the
+   frontend, hand off to <code>goquake1.Run</code>.</p>
+</li>
+<li>
+<p><strong>Provable-protocol harness.</strong> Mechanically port
+   <code>cloud-boot/godoom/cmd/harvest-reference</code> to
+   <code>cloud-boot/goquake1/cmd/harvest-reference</code>; checkpoint tics
+   {1, 35, 70, 140, 350}; host oracle byte-equal, guest oracle
+   chi^2 ≤ TBD (calibrate at harvest time, same shape as DOOM's
+   50000.0 threshold).</p>
+</li>
+<li>
+<p><strong>CI gate.</strong> New workflow <code>.github/workflows/quake1-provable.yml</code>
+    mirroring <code>doom-provable.yml</code>. PASS = all gates clear; FAIL =
+    per-checkpoint diff on stderr.</p>
+</li>
+</ol>
+<h3 id="what-is-hard-about-q-1a-honest">What is hard about Q-1a (honest)<a class="headerlink" href="#what-is-hard-about-q-1a-honest" title="Permanent link">#</a></h3>
+<ul>
+<li><strong>PAK embedding size.</strong> Shareware PAK0 is ~18 MiB; that goes
+  into the TamaGo binary as a const slice. Build-time RAM
+  ceiling on the toolchain may bite. Mitigation: build with
+  <code>-tags embedpak</code> only when shipping the demo image.</li>
+<li><strong>Renderer determinism.</strong> Quake's soft renderer is integer up
+  to and including span fill, but its visibility setup uses
+  <code>gettimeofday</code> for the <code>r_speeds</code> counters; the timing path
+  needs the same pinning treatment R-doom1g applied to DOOM
+  (<code>SetDeterministicTics</code> analogue).</li>
+<li><strong>ironwail-go provenance.</strong> It is unreviewed by upstream
+  Ironwail authors and AI-assisted; we will need our own audit
+  pass and our own test coverage targets before we can claim
+  cloud-boot quality on it (the org's 100% coverage rule
+  applies — see go-deltasync conventions).</li>
+<li><strong>Frame size.</strong> Quake renders 320x200 by default but is
+  trivially resized; the BGRA framebuffer scales fine but the
+  oracle PPMs grow ~4-9x vs DOOM's; budget for it.</li>
+</ul>
+<hr />
+<h2 id="6-open-questions-user-decisions-before-work-starts">§6 — Open questions (user decisions before work starts)<a class="headerlink" href="#6-open-questions-user-decisions-before-work-starts" title="Permanent link">#</a></h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Question</th>
+<th>Why it blocks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q-1</td>
+<td><strong>Engine choice for Q-1a.</strong> Fork <code>darkliquid/ironwail-go</code> (GPL-2.0, AI-assisted, unreviewed by upstream) OR <code>ccgo</code>-transpile WinQuake from <code>id-Software/Quake</code> (GPL-2.0, mechanical translation, larger up-front effort)?</td>
+<td>Determines week-1 work shape and audit posture</td>
+</tr>
+<tr>
+<td>Q-2</td>
+<td><strong>PAK source.</strong> Ship shareware <code>pak0.pak</code> (legally redistributable, demo episode E1 only) OR require operator-supplied <code>pak0.pak</code> + <code>pak1.pak</code> (full game)?</td>
+<td>Affects what we can commit to the demo image</td>
+</tr>
+<tr>
+<td>Q-3</td>
+<td><strong>Performance target.</strong> Is "15-20 FPS on TCG, full speed on KVM" acceptable for Q-1a, or do we gate the phase on a specific FPS floor?</td>
+<td>Drives whether soft renderer is "good enough" or Q-1b becomes mandatory</td>
+</tr>
+<tr>
+<td>Q-4</td>
+<td><strong>Multiplayer scope.</strong> Confirmed out of scope for v1 of this roadmap, or should Q-MP move earlier?</td>
+<td>Affects whether to start gvisor-tap-vsock integration in parallel</td>
+</tr>
+<tr>
+<td>Q-5</td>
+<td><strong>GL strategy decision point.</strong> Commit now to route 2 (gogpu virgl-shim) for Q-1b, or defer until Q-1a lands and we have a real measurement of soft-renderer ceiling?</td>
+<td>Affects whether to bring <code>gogpu</code> into the dependency graph for Q-1a</td>
+</tr>
+<tr>
+<td>Q-6</td>
+<td><strong>Q2 engine route.</strong> When we get to Q-2, default to <code>ccgo</code>-transpile of yquake2/q2pro (mechanical, reproducible) OR AI-assisted hand port (faster initial bring-up, harder to audit)?</td>
+<td>Sets the precedent for how cloud-boot acquires non-existent pure-Go engines going forward</td>
+</tr>
+<tr>
+<td>Q-7</td>
+<td><strong>Q3 in v1 of the roadmap at all?</strong> Q3 is XL+ and depends on a virgl shim we haven't built. Drop it from the v1 roadmap and add when Q-2 lands?</td>
+<td>Affects scope of this very document</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="appendix-a-references">Appendix A — References<a class="headerlink" href="#appendix-a-references" title="Permanent link">#</a></h2>
+<ul>
+<li><a href="../doom-provable-protocol/">DOOM provable test protocol (R-doom1g)</a> — the
+  provable-protocol shape every Quake phase inherits.</li>
+<li><a href="https://github.com/cloud-boot/tamago-uefi/blob/main/phase3_oci_doom_boot.go">Phase 3 OCI-DOOM-boot probe</a> —
+  the template every <code>phaseQ*</code> probe will mirror.</li>
+<li><a href="https://github.com/cloud-boot/godoom/blob/main/backend/tamago/frontend.go">godoom TamaGo frontend</a> —
+  the frontend interface shape we will mechanically copy.</li>
+<li><a href="https://github.com/go-virtio/gpu">go-virtio/gpu</a> — 2D scanout +
+  hand-encoded virgl 3D path + soft3d.</li>
+<li><a href="https://github.com/darkliquid/ironwail-go">darkliquid/ironwail-go</a> —
+  the load-bearing upstream for Q-1.</li>
+<li><a href="https://github.com/gogpu/gogpu">gogpu/gogpu</a> — pure-Go WebGPU framework
+  with software backend; the most realistic route to a virgl shim.</li>
+<li><a href="https://github.com/AndreRenaud/gore">AndreRenaud/gore</a> — the pure-Go DOOM
+  engine cloud-boot/godoom forks; established the <code>ccgo</code> transpile precedent.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../doom-provable-protocol/" class="md-footer__link md-footer__link--prev" aria-label="Previous: DOOM provable test protocol (R-doom1g)">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                DOOM provable test protocol (R-doom1g)
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../filesystems/" class="md-footer__link md-footer__link--next" aria-label="Next: Filesystem drivers">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Filesystem drivers
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      BSD-3-Clause &middot; cloud-boot contributors
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/cloud-boot" target="_blank" rel="noopener" title="cloud-boot on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.indexes", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
