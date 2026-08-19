@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/logo.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -4083,7 +4083,7 @@ double-indirect chain.</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>superblock: bsize=32768 fsize=4096 ncg=48 magic=ok
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>/boot/kernel: 20 entries
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>/boot/kernel/kernel: size=29185072 bytes mode=0100644
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>/boot/loader.conf: 659 bytes; first line: &quot;# Synthetic /boot/loader.conf …&quot;
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>/boot/loader.conf: 659 bytes; first line: "# Synthetic /boot/loader.conf …"
 </span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>OK — go-filesystems/ufs successfully read the partition
 </span></code></pre></div>
 <p>The 29 MiB kernel lands intact, double-indirect-or-single-indirect
@@ -4140,20 +4140,20 @@ delivers more bytes than <code>dst</code> can hold; surfaces
 chunk SHA-256 + redirect chain + size/digest verification mirror
 <code>FetchBlobStream</code> exactly — only the sink changes.</p>
 <p><strong>Wire-in</strong> (<code>phase2_oci_freebsd_boot.go</code>):</p>
-<div class="language-go highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1">// before (Sprint 2D&#39;):</span>
+<div class="language-go highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1">// before (Sprint 2D'):</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kd">var</span><span class="w"> </span><span class="nx">buf</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span>
-</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="nx">buf</span><span class="p">.</span><span class="nx">Grow</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">))</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="nx">buf</span><span class="p">.</span><span class="nx">Grow</span><span class="p">(</span><span class="kt">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">))</span>
 </span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">ferr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">reg</span><span class="p">.</span><span class="nx">FetchBlobStream</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">buf</span><span class="p">)</span>
 </span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="nx">imageBytes</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">buf</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">()</span>
 </span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="c1">// + post-stream pad-append that may realloc</span>
 </span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="c1">// after (Sprint 2D&#39;&#39;):</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="c1">// after (Sprint 2D''):</span>
 </span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="nx">tailPad</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="k">if</span><span class="w"> </span><span class="nx">rem</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">512</span><span class="p">;</span><span class="w"> </span><span class="nx">rem</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
-</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">    </span><span class="nx">tailPad</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">rem</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="k">if</span><span class="w"> </span><span class="nx">rem</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kt">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">512</span><span class="p">;</span><span class="w"> </span><span class="nx">rem</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">    </span><span class="nx">tailPad</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">rem</span>
 </span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="p">}</span>
-</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="nx">imageBytes</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="nb">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)</span><span class="o">+</span><span class="nx">tailPad</span><span class="p">)</span>
-</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">ferr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">reg</span><span class="p">.</span><span class="nx">FetchBlobToBuffer</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span><span class="w"> </span><span class="nx">imageBytes</span><span class="p">[:</span><span class="nb">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)])</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="nx">imageBytes</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)</span><span class="o">+</span><span class="nx">tailPad</span><span class="p">)</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">ferr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">reg</span><span class="p">.</span><span class="nx">FetchBlobToBuffer</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span><span class="w"> </span><span class="nx">imageBytes</span><span class="p">[:</span><span class="kt">int</span><span class="p">(</span><span class="nx">target</span><span class="p">.</span><span class="nx">Size</span><span class="p">)])</span>
 </span></code></pre></div>
 <p>One <code>make([]byte, ...)</code> for the lifetime of the image. No
 <code>bytes.Buffer</code>. No <code>buf.Bytes()</code> alias. No tail-pad reallocation
@@ -4309,7 +4309,7 @@ ftp.openbsd.org/pub/OpenBSD/7.6/amd64/miniroot76.img). All sprint-3 PASS
 gates hit:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>phase3-oci-openbsd-boot: lease acquired; IP = 10.0.2.15
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>phase3-oci-openbsd-boot: streamed 16826880 bytes; SHA-256 verified OK
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>phase3-oci-openbsd-boot: streamed image header OK (MBR 0x55AA + GPT &#39;EFI PART&#39;)
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>phase3-oci-openbsd-boot: streamed image header OK (MBR 0x55AA + GPT 'EFI PART')
 </span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>phase3-oci-openbsd-boot: PublishBlockIO OK; block handle = 0x7e204398
 </span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>phase3-oci-openbsd-boot: ConnectController OK (DiskIo/PartitionDxe/FatDxe binding done)
 </span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>phase3-oci-openbsd-boot: LocateHandleBuffer(SFS) found 2 total handle(s)
@@ -5092,7 +5092,7 @@ Root cause hypothesis: phase2_tpm_measure pulls in go-tpm2 code that has its own
 <p>WAV-capture verification (new in this sprint): added <code>DOOMBOOT_LIVE_AUDIO_WAV</code> env override to <code>internal/livedoomboot/run.sh</code>. When set, QEMU is launched with <code>-audiodev wav,id=snd0,path=$PATH</code> instead of <code>-audiodev none,…</code>. Because QEMU's <code>wav</code> backend is OUTPUT-ONLY (no <code>init_in</code> op), the override also flips <code>virtio-sound-pci,streams=1</code> so the device only advertises the output stream — otherwise the device init aborts with "Can not open `virtio-sound.in' (no host audio driver)" and the EFI image is never loaded. The runner then parses the captured WAV with stdlib Python (no PIL/ffmpeg dep) and prints sample count + non-zero percentage + RMS.</p>
 <p>Result (<code>DOOMBOOT_LIVE_TIMEOUT=30 DOOMBOOT_LIVE_AUDIO_WAV=/tmp/doom-verify.wav bash internal/livedoomboot/run.sh amd64</code>):</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a>[live-doomboot:amd64] audio capture mode: WAV → /tmp/doom-verify.wav (streams=1)
-</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>[live-doomboot:amd64] PASS — matched &quot;handing off to gore.Run&quot; — wall=30186ms
+</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>[live-doomboot:amd64] PASS — matched "handing off to gore.Run" — wall=30186ms
 </span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>[live-doomboot:amd64] audio: wrote 4688468 bytes to /tmp/doom-verify.wav
 </span><span id="__span-23-4"><a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a>[live-doomboot:audio] samples=2344212 nonzero=2283112 (97.4%) peak=32768 rms=9687
 </span></code></pre></div>
@@ -5318,7 +5318,7 @@ Root cause hypothesis: phase2_tpm_measure pulls in go-tpm2 code that has its own
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.indexes", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>
