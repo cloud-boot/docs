@@ -3,13 +3,49 @@ name: docs
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Build on every pull request as well as on main, so a change to the docs
+  # or to the toolchain in requirements.txt has to prove it still builds
+  # before it lands. Without this the workflow ran only on main, which meant
+  # a dependency bump had no signal at all.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs Material + mike
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # --strict turns a broken link or an unknown config key into a failure
+      # rather than a warning nobody reads.
+      - name: Build the site (strict)
+        run: mkdocs build --strict
+
   deploy:
+    # Only main publishes. A pull request stops after build above: it has no
+    # business pushing to gh-pages.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    # Never two deploys at once: mike pushes gh-pages and the second is
+    # rejected outright. cancel-in-progress stays false -- killing a publish
+    # half way through is worse than making it wait.
+    concurrency:
+      group: gh-pages-deploy
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
