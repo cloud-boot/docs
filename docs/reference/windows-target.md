@@ -53,22 +53,30 @@ two free legit paths exist:
 
 | Source | Format | Free? | Notes |
 | --- | --- | --- | --- |
-| Microsoft Edge dev VMs ([download](https://developer.microsoft.com/en-us/microsoft-edge/tools/vms/)) | VHDX (Hyper-V) | 90-day eval | **Easiest** — Win10/11 pre-installed |
+| ~~Microsoft Edge dev VMs~~ | VHDX (Hyper-V) | — | **Retired.** `developer.microsoft.com/…/microsoft-edge/tools/vms/` returns 404 (checked with a browser user-agent too, 2026-09-23). Use the Eval Center row. |
 | Windows Server eval ([Eval Center](https://www.microsoft.com/en-us/evalcenter/)) | ISO | 180-day eval | Need to install once, then commit the qcow2 |
 | Hyper-V Server 2019 | ISO | gratis perpetual | Lite — headless, smallest image |
 | Windows-To-Go via `WinToUSB` | raw partition | personal use OK | Reproduces the `\EFI\BOOT\BOOT<arch>.EFI` fallback path |
 
-For the loader's `CloudBootTarget=windows` smoke test, the dev VMs
-are the path of least resistance — they boot directly without a
-manual install.
+For the loader's `CloudBootTarget=windows` smoke test the dev VMs
+used to be the path of least resistance — they booted directly
+without a manual install. With that programme retired, the Eval
+Center ISO is the remaining free route, and it needs one install
+before the qcow2 can be committed.
+
+The routing itself does not need Windows at all: the
+[`windows-stub`](https://github.com/cloud-boot/windows-image) is a
+~3 KiB PE32+ that mimics Boot Manager's handoff, and exercises the
+same `LoadImage(DevicePath)` path with no Microsoft bytes involved.
 
 ### One-shot test script
 
 `loader/scripts/test-windows.sh` automates the dev-VM smoke test:
 
 ```sh
-# 1. Download the dev VM once (manual, after agreeing to the eval
-#    terms at https://developer.microsoft.com/en-us/microsoft-edge/tools/vms/).
+# 1. Obtain a Windows VHDX once, manually, after agreeing to whatever
+#    eval terms it carries. The Edge dev-VM programme this used to
+#    name is retired; the Eval Center is the remaining free route.
 #    Place the VHDX at $HOME/Downloads/MSEdge-Win11.vhdx (or pass
 #    --vhdx <path>).
 loader/scripts/test-windows.sh --vhdx ~/Downloads/MSEdge-Win11.vhdx
@@ -117,7 +125,7 @@ end-to-end without any Microsoft binary on disk.
 
 Source: [`cloud-boot/windows-image/stub/`](https://github.com/cloud-boot/windows-image/tree/main/stub).
 Published OCI artifact:
-[`ghcr.io/cloud-boot/windows-stub:latest`](https://github.com/orgs/cloud-boot/packages/container/windows-stub).
+`ghcr.io/cloud-boot/windows-stub:latest`, built and published by [cloud-boot/windows-image](https://github.com/cloud-boot/windows-image).
 
 The stub:
 
