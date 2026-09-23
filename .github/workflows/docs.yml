@@ -38,6 +38,58 @@ jobs:
       - name: Build the site (strict)
         run: mkdocs build --strict
 
+  # ⛔ --strict ABOVE DOES NOT FETCH ANYTHING. It resolves links BETWEEN
+  # documents and fails on an unknown config key; an https:// URL is just
+  # text to it. So this repository published
+  #     Path B -- Pure-UEFI loader. Lives in [`loader/`](https://github.com/cloud-boot/loader)
+  # for ten weeks while that URL returned 404, because the repository had
+  # never been pushed. A strict build was green throughout.
+  links:
+    name: every external link resolves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check
+        run: |
+          set -uo pipefail
+          # The character class matters: an extractor that stops only at )
+          # and " carries a closing > or < into the request.
+          urls=$(grep -rhoE 'https?://[^)">< [:space:]]+' docs/ README.md | sed -E 's/[.,`]+$//' | sort -u)
+          test -n "$urls" || { echo "::error::no links found; are the docs still there?"; exit 1; }
+          echo "checking $(printf '%s\n' "$urls" | wc -l) distinct URLs"
+          fail=0
+          while read -r u; do
+            # img.shields.io renders whatever it is asked for and proves nothing.
+            case "$u" in
+              # Renders whatever it is asked for; proves nothing.
+              *img.shields.io*) continue ;;
+              # Documented placeholders. keystone.example.com is what an
+              # OpenStack endpoint looks like in an example, not a host.
+              *example.com*|*example.org*|*example.net*|*localhost*|*127.0.0.1*|*.invalid*) continue ;;
+              # 169.254.169.254 is the cloud metadata service: link-local by
+              # definition, reachable only from inside an instance. Quoting it
+              # is the point of the page that quotes it.
+              *169.254.169.254*) continue ;;
+            esac
+            # Three attempts: one is a flake detector rather than a link
+            # checker, and a lane that fails at random gets ignored.
+            code=000
+            for attempt in 1 2 3; do
+              # NOT `|| echo 000`: curl prints 000 itself on a DNS failure and
+              # ALSO exits non-zero, so the fallback appended a second one and
+              # the report said 000000.
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" 2>/dev/null) || true
+              code=${code:-000}
+              case "$code" in 2*|3*) break ;; esac
+              sleep 3
+            done
+            case "$code" in
+              2*|3*) printf '  ok   %s  %s\n' "$code" "$u" ;;
+              *)     printf '  FAIL %s  %s\n' "$code" "$u"; fail=1 ;;
+            esac
+          done <<< "$urls"
+          test "$fail" -eq 0 || { echo "::error::at least one link does not resolve"; exit 1; }
+
   deploy:
     # Only main publishes. A pull request stops after build above: it has no
     # business pushing to gh-pages.

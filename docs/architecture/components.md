@@ -33,7 +33,7 @@ UKI hands off. Owns:
 - **LUKS1/LUKS2 unlock** (`github.com/go-fde/luks`) — ext4 or ZFS on
   top of LUKS, passphrase via metadata-URL to keep
   `/proc/cmdline` clean.
-- **ZFS native encryption** via `github.com/go-crypto/zfscrypt`
+- **ZFS native encryption** via `github.com/go-encryptions/zfscrypt`
   (AES-CCM/GCM, PBKDF2-HMAC-SHA1 wrap, HKDF-SHA512 per-block).
 - **Metadata-URL overrides** (`cloudboot.metadata.url=`) — pull a
   JSON `cloudboot` block from any HTTP endpoint, no `boot.iso`

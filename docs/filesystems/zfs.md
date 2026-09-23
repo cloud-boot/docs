@@ -9,7 +9,7 @@ title: ZFS
 Read/write ZFS filesystem driver in pure Go. Reads real OpenZFS
 2.1.x pools — single-vdev, mirror, and **all three raidz levels**
 (raidz1, raidz2, raidz3). With the sibling
-[`github.com/go-crypto/zfscrypt`](https://github.com/go-crypto/zfscrypt)
+[`github.com/go-encryptions/zfscrypt`](https://github.com/go-encryptions/zfscrypt)
 it also reads ZFS **native encryption** (AES-CCM/GCM).
 
 This is the most involved driver in `go-filesystems/*` and the one
@@ -147,7 +147,7 @@ LUKS-on-ZFS layout (`rpool/ROOT/pve-1`) is supported end-to-end.
 Pure-Go AES-CCM (RFC 3610 / NIST SP 800-38C — stdlib only ships
 GCM) lives in `github.com/go-crypto/ccm`. The ZFS-specific glue
 (PBKDF2-HMAC-SHA1 wrap, HKDF-SHA512 per-block, AEAD per-block
-decryption) lives in `github.com/go-crypto/zfscrypt`. Both are
+decryption) lives in `github.com/go-encryptions/zfscrypt`. Both are
 consumed by `go-filesystems/zfs`'s `OpenFromDeviceDatasetWithKey`
 entry point.
 

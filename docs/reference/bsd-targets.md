@@ -138,12 +138,12 @@ login:
 - **OpenBSD verification.** Routing code is in tree and
   unit-tested. OpenBSD doesn't publish pre-installed arm64 cloud
   images, but the project's
-  [`install76.img`](https://cdn.openbsd.org/pub/OpenBSD/7.6/arm64/install76.img)
+  [`install78.img`](https://cdn.openbsd.org/pub/OpenBSD/7.8/arm64/install78.img)
   is bootable under QEMU. A scripted auto-installer produces
   `openbsd76-arm64.qcow2` reproducibly — see
   [`loader/scripts/install-openbsd-arm64.sh`](https://github.com/cloud-boot/loader/blob/main/scripts/install-openbsd-arm64.sh).
   The script:
-    1. Downloads `install76.img` + `bsd.rd` from cdn.openbsd.org.
+    1. Downloads `install78.img` + `bsd.rd` from cdn.openbsd.org.
     2. Crafts a tiny `site76.tgz` carrying `auto_install.conf`
        (hostname, timezone, no users, console=com0).
     3. Boots QEMU with the installer image plus a blank 8 GiB
