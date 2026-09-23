@@ -2007,10 +2007,10 @@ two free legit paths exist:</p>
 </thead>
 <tbody>
 <tr>
-<td>Microsoft Edge dev VMs (<a href="https://developer.microsoft.com/en-us/microsoft-edge/tools/vms/">download</a>)</td>
+<td><del>Microsoft Edge dev VMs</del></td>
 <td>VHDX (Hyper-V)</td>
-<td>90-day eval</td>
-<td><strong>Easiest</strong> — Win10/11 pre-installed</td>
+<td>—</td>
+<td><strong>Retired.</strong> <code>developer.microsoft.com/…/microsoft-edge/tools/vms/</code> returns 404 (checked with a browser user-agent too, 2026-09-23). Use the Eval Center row.</td>
 </tr>
 <tr>
 <td>Windows Server eval (<a href="https://www.microsoft.com/en-us/evalcenter/">Eval Center</a>)</td>
@@ -2032,28 +2032,35 @@ two free legit paths exist:</p>
 </tr>
 </tbody>
 </table>
-<p>For the loader's <code>CloudBootTarget=windows</code> smoke test, the dev VMs
-are the path of least resistance — they boot directly without a
-manual install.</p>
+<p>For the loader's <code>CloudBootTarget=windows</code> smoke test the dev VMs
+used to be the path of least resistance — they booted directly
+without a manual install. With that programme retired, the Eval
+Center ISO is the remaining free route, and it needs one install
+before the qcow2 can be committed.</p>
+<p>The routing itself does not need Windows at all: the
+<a href="https://github.com/cloud-boot/windows-image"><code>windows-stub</code></a> is a
+~3 KiB PE32+ that mimics Boot Manager's handoff, and exercises the
+same <code>LoadImage(DevicePath)</code> path with no Microsoft bytes involved.</p>
 <h3 id="one-shot-test-script">One-shot test script<a class="headerlink" href="#one-shot-test-script" title="Permanent link">#</a></h3>
 <p><code>loader/scripts/test-windows.sh</code> automates the dev-VM smoke test:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># 1. Download the dev VM once (manual, after agreeing to the eval</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1">#    terms at https://developer.microsoft.com/en-us/microsoft-edge/tools/vms/).</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="c1">#    Place the VHDX at $HOME/Downloads/MSEdge-Win11.vhdx (or pass</span>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1">#    --vhdx &lt;path&gt;).</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>loader/scripts/test-windows.sh<span class="w"> </span>--vhdx<span class="w"> </span>~/Downloads/MSEdge-Win11.vhdx
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># 2. The script:</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="c1">#    - Converts the VHDX to raw via qemu-img convert.</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="c1">#    - Builds the loader (task -d ../ link-amd64) into BOOTX64.EFI.</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">#    - Stages a tiny FAT ESP containing our BOOTX64.EFI + a NVRAM</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="c1">#      seed that pre-sets CloudBootTarget=windows.</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1">#    - Launches qemu-system-x86_64 with OVMF, the ESP, and the</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="c1">#      Windows disk.</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="c1">#    - Tails the serial console for the magic strings</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="c1">#      "LoadImage(DevicePath) OK" (our loader handed off) and</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="c1">#      "Loading kernel..." or "Windows" (Boot Manager started).</span>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="c1">#    - Times out after 4 minutes if either marker doesn't appear.</span>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># 1. Obtain a Windows VHDX once, manually, after agreeing to whatever</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1">#    eval terms it carries. The Edge dev-VM programme this used to</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="c1">#    name is retired; the Eval Center is the remaining free route.</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1">#    Place the VHDX at $HOME/Downloads/MSEdge-Win11.vhdx (or pass</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="c1">#    --vhdx &lt;path&gt;).</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>loader/scripts/test-windows.sh<span class="w"> </span>--vhdx<span class="w"> </span>~/Downloads/MSEdge-Win11.vhdx
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="c1"># 2. The script:</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="c1">#    - Converts the VHDX to raw via qemu-img convert.</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">#    - Builds the loader (task -d ../ link-amd64) into BOOTX64.EFI.</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="c1">#    - Stages a tiny FAT ESP containing our BOOTX64.EFI + a NVRAM</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1">#      seed that pre-sets CloudBootTarget=windows.</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="c1">#    - Launches qemu-system-x86_64 with OVMF, the ESP, and the</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="c1">#      Windows disk.</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="c1">#    - Tails the serial console for the magic strings</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="c1">#      "LoadImage(DevicePath) OK" (our loader handed off) and</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="c1">#      "Loading kernel..." or "Windows" (Boot Manager started).</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="c1">#    - Times out after 4 minutes if either marker doesn't appear.</span>
 </span></code></pre></div>
 <h3 id="expected-serial-output">Expected serial output<a class="headerlink" href="#expected-serial-output" title="Permanent link">#</a></h3>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>  our DeviceHandle captured
@@ -2078,7 +2085,7 @@ enough to test the loader's <code>CloudBootTarget=windows</code> routing
 end-to-end without any Microsoft binary on disk.</p>
 <p>Source: <a href="https://github.com/cloud-boot/windows-image/tree/main/stub"><code>cloud-boot/windows-image/stub/</code></a>.
 Published OCI artifact:
-<a href="https://github.com/orgs/cloud-boot/packages/container/windows-stub"><code>ghcr.io/cloud-boot/windows-stub:latest</code></a>.</p>
+<code>ghcr.io/cloud-boot/windows-stub:latest</code>, built and published by <a href="https://github.com/cloud-boot/windows-image">cloud-boot/windows-image</a>.</p>
 <p>The stub:</p>
 <ol>
 <li>Opens <code>LoadedImageProtocol</code> on its own ImageHandle.</li>

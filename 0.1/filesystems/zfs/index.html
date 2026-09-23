@@ -1917,7 +1917,7 @@
 <p>Read/write ZFS filesystem driver in pure Go. Reads real OpenZFS
 2.1.x pools — single-vdev, mirror, and <strong>all three raidz levels</strong>
 (raidz1, raidz2, raidz3). With the sibling
-<a href="https://github.com/go-crypto/zfscrypt"><code>github.com/go-crypto/zfscrypt</code></a>
+<a href="https://github.com/go-encryptions/zfscrypt"><code>github.com/go-encryptions/zfscrypt</code></a>
 it also reads ZFS <strong>native encryption</strong> (AES-CCM/GCM).</p>
 <p>This is the most involved driver in <code>go-filesystems/*</code> and the one
 where the most pre-existing on-disk format bugs were uncovered.</p>
@@ -2029,7 +2029,7 @@ LUKS-on-ZFS layout (<code>rpool/ROOT/pve-1</code>) is supported end-to-end.</p>
 <p>Pure-Go AES-CCM (RFC 3610 / NIST SP 800-38C — stdlib only ships
 GCM) lives in <code>github.com/go-crypto/ccm</code>. The ZFS-specific glue
 (PBKDF2-HMAC-SHA1 wrap, HKDF-SHA512 per-block, AEAD per-block
-decryption) lives in <code>github.com/go-crypto/zfscrypt</code>. Both are
+decryption) lives in <code>github.com/go-encryptions/zfscrypt</code>. Both are
 consumed by <code>go-filesystems/zfs</code>'s <code>OpenFromDeviceDatasetWithKey</code>
 entry point.</p>
 <h2 id="on-disk-format-bugs-the-lib-had-to-fix">On-disk format bugs the lib had to fix<a class="headerlink" href="#on-disk-format-bugs-the-lib-had-to-fix" title="Permanent link">#</a></h2>
