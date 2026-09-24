@@ -2,7 +2,7 @@
 
 **Status:** sprint 1 (FreeBSD MVP) **DONE** — sprint 1.3 closed 2026-06-11 (defensive FP saves on arm64/riscv64/loong64 RNG trampolines); sprint 2 (UFS) DONE; sprint 3 (NetBSD/OpenBSD) DONE — sprint 3.x closed 2026-06-11 (NetBSD live boot PASS via 307 MiB installer boot.iso, `NetBSD/x86 EFI Boot (x64)` banner + `boot:` prompt reached); sprint 4 (Windows scaffolding) DONE.
 **Owner:** cloud-boot/tamago-uefi
-**Companion repos:** [`go-virtio`](../../../../go-virtio), [`go-filesystems`](../../../../go-filesystems)
+**Companion repos:** [`go-virtio`](https://github.com/go-virtio), [`go-filesystems`](https://github.com/go-filesystems)
 
 ## Goal
 

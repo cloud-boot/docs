@@ -5,7 +5,7 @@
 mkdocs source for `https://cloud-boot.github.io/docs/`. Built with
 [mkdocs-material](https://squidfunk.github.io/mkdocs-material/) and
 deployed in versioned form by [mike](https://github.com/jimporter/mike)
-via [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+via [`.github/workflows/pages.yml`](https://github.com/cloud-boot/.github/blob/main/workflows/pages.yml).
 
 ## Release model
 
