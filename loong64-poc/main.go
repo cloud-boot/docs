@@ -1,3 +1,19 @@
+// ⛔ NOT buildable by the Go toolchain you have. This is a bare-metal board
+// file: it links against runtime/goos, which exists only in TamaGo, and
+// imports github.com/usbarmory/tamago/loong64, whose loong64 support this
+// repository still carries as patches (see BUILD.md and
+// tamago-loong64-fork.patch). Stock `go build` answers
+//
+//	loong64-poc/main.go:6:2: no required module provides package
+//	github.com/usbarmory/tamago/loong64
+//
+// and until now nothing in CI ever asked, because this repository had no Go
+// job at all. The tag states the requirement instead of leaving a package
+// that silently does not compile: GOOS=tamago sets it, and `go build ./...`
+// and `go vet ./...` skip a package whose files are all excluded.
+//
+//go:build tamago
+
 package main
 
 import (
