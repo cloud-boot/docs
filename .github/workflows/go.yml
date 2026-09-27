@@ -1,0 +1,45 @@
+# This repository is documentation with Go in it, and until now it had no Go
+# job. The consequence was measurable rather than theoretical: `go vet ./...`
+# FAILED here, because loong64-poc imported a package no go.mod required, and
+# nobody could see it.
+name: go
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version: stable }
+      - run: go vet ./...
+      - run: go build ./...
+
+      # ⛔ qemu-system-riscv64 is DELIBERATELY not installed here, and that is
+      # the honest state rather than an oversight.
+      #
+      # TestRiscv64EDK2BootReachesDone boots EDK2 under QEMU and waits for the
+      # runtime marker; it is the test that proves the image-protection fix
+      # this repository documents. It passes — 6.48s on a machine that has
+      # qemu-system-riscv64, the edk2-riscv firmware pair and the EFI binary.
+      #
+      # It needs BOOTRISCV64.EFI, built by cloud-boot/tamago-uefi with the
+      # TamaGo toolchain. That file is not tracked in git, tamago-uefi
+      # publishes no release carrying it, and there is no artifact contract
+      # between the two repositories yet. Installing qemu-system-misc alone
+      # would satisfy the LookPath and the test would skip one line later, on
+      # the unreadable EFI — a green lane bought by moving a skip, which is
+      # the defect, not the cure.
+      #
+      # So the test is compiled and run, and it skips, saying which file it
+      # wanted. When tamago-uefi publishes the EFI, the install goes here and
+      # a guard on "not readable" goes below it.
+      - run: go test -v ./...
