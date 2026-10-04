@@ -23,6 +23,7 @@ import (
 )
 
 // QEMU loongarch 'virt' low RAM (above the reserved boot_info/fdt at 0..2MB).
+//
 //go:linkname ramStart runtime/goos.RamStart
 var ramStart uint = 0x2000000
 
