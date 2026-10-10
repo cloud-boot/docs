@@ -81,7 +81,7 @@ jobs:
               https://github.com/*/*/blob/*|https://github.com/*/*/tree/*)
                 p=${u#https://github.com/}; p=${p%%#*}; p=${p%%\?*}
                 IFS=/ read -r o r _ ref file <<< "$p"
-                code=$(gh api -i "repos/$o/$r/contents/$file?ref=$ref" 2>/dev/null | head -1 | awk '{print $2}')
+                code=$(gh api -i "repos/$o/$r/contents/$file?ref=$ref" 2>/dev/null | head -1 | awk '{print $2}') || true  # head closes the pipe: SIGPIPE, 141 under -e
                 code=${code:-000}
                 case "$code" in
                   2*) printf '  ok   %s  %s (api)\n' "$code" "$u"; continue ;;
