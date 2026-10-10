@@ -50,6 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           # The character class matters: an extractor that stops only at )
@@ -71,10 +73,25 @@ jobs:
               # is the point of the page that quotes it.
               *169.254.169.254*) continue ;;
             esac
+            # A file on GitHub is asked of the API, not of github.com's HTML:
+            # github.com answers a burst from a runner with 503 for pages that
+            # exist (11 of them on 2026-10-10, all 200 from elsewhere). The
+            # contents API says 200 or 404 about the file itself.
+            case "$u" in
+              https://github.com/*/*/blob/*|https://github.com/*/*/tree/*)
+                p=${u#https://github.com/}; p=${p%%#*}; p=${p%%\?*}
+                IFS=/ read -r o r _ ref file <<< "$p"
+                code=$(gh api -i "repos/$o/$r/contents/$file?ref=$ref" 2>/dev/null | head -1 | awk '{print $2}')
+                code=${code:-000}
+                case "$code" in
+                  2*) printf '  ok   %s  %s (api)\n' "$code" "$u"; continue ;;
+                  404) printf '  FAIL %s  %s (api)\n' "$code" "$u"; fail=1; continue ;;
+                esac ;;  # anything else: fall through to curl below
+            esac
             # Three attempts: one is a flake detector rather than a link
             # checker, and a lane that fails at random gets ignored.
             code=000
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               # NOT `|| echo 000`: curl prints 000 itself on a DNS failure and
               # ALSO exits non-zero, so the fallback appended a second one and
               # the report said 000000.
