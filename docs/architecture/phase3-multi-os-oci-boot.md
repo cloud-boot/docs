@@ -950,7 +950,7 @@ EFI boot image; the canonical `/EFI/BOOT/BOOTX64.EFI` is not surfaced
 as a regular file in the ISO9660 tree). `internal/livenetbsdboot/run.sh`
 now (a) defaults to `NetBSD-10.0-amd64-boot.iso` cached under
 `~/Downloads/` or `/tmp/netbsd/`, (b) auto-downloads it from
-`https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/installation/cdrom/boot.iso`
+`https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-10.0/amd64/installation/cdrom/boot.iso`
 when no cached image is found, and (c) probes both `/EFI/BOOT/BOOTX64.EFI`
 and `/usr/mdec/bootx64.efi` on extraction.
 
