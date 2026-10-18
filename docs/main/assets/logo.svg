@@ -1,0 +1,14 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="cloud-boot">
+  <defs>
+    <linearGradient id="cb" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B8DEF"/>
+      <stop offset="1" stop-color="#3A1FB5"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#cb)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M86 170h84a30 30 0 0 0 4-59.6 44 44 0 0 0-85-9A34 34 0 0 0 86 170Z"/>
+    <path d="M128 156V116"/>
+    <path d="M110 132l18-18 18 18"/>
+  </g>
+</svg>
