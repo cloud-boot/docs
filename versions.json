@@ -5,5 +5,13 @@
     "aliases": [
       "latest"
     ]
+  },
+  {
+    "version": "main",
+    "title": "main",
+    "aliases": [],
+    "properties": {
+      "development": true
+    }
   }
 ]
