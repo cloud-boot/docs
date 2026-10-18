@@ -1,120 +1,105 @@
 name: docs
 
+# Every documentation version is a separate Hugo build, published under
+# https://cloud-boot.github.io/docs/<version>/ on the gh-pages branch, where <version> is
+# the minor version of the code the pages describe (params.docs.version in
+# hugo.yaml: v0.3.1 -> 0.3), or "main" while no release is tagged. Each push to
+# main replaces that version's path and leaves the others alone. Pull requests
+# build and check, and publish nothing.
+#
+# ⛔ This replaced MkDocs Material plus mike: a Python toolchain, a
+# requirements.txt and a pip install to render a static site for a pure-Go
+# organisation.
+
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
-# The build needs nothing beyond the source. Write access to the repository
-# is granted to the deploy job alone, below, so a pull request build cannot
-# push to gh-pages.
 permissions:
   contents: read
 
+env:
+  HUGO_VERSION: "0.167.0"
+  # sha256 of hugo_${HUGO_VERSION}_linux-amd64.tar.gz, from the release's checksums.txt.
+  HUGO_SHA256: "4d84519b9f619e6d4c3fb45a50157abeabeb724f859c60605f44c23def6e1169"
+  DOCS_URL: "https://cloud-boot.github.io/docs"
+
 jobs:
-  # Build on every pull request as well as on main, so a change to the docs
-  # or to the toolchain in requirements.txt has to prove it still builds
-  # before it lands. Without this the workflow ran only on main, which meant
-  # a dependency bump had no signal at all.
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
         with:
-          python-version: "3.15"
+          # themes/hextra is the tannevaled/hextra fork, pinned to a release tag.
+          submodules: recursive
+          # The whole history: each page's date comes from git.
+          fetch-depth: 0
 
-      - name: Install MkDocs Material + mike
+      - name: Install Hugo ${{ env.HUGO_VERSION }}
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          curl -fsSL -o /tmp/hugo.tar.gz \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
+          echo "${HUGO_SHA256}  /tmp/hugo.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/hugo.tar.gz -C /usr/local/bin hugo
+          hugo version
 
-      # --strict turns a broken link or an unknown config key into a failure
-      # rather than a warning nobody reads.
-      - name: Build the site (strict)
-        run: mkdocs build --strict
+      - name: Version
+        id: version
+        run: |
+          documented=$(hugo config --format json | jq -r '.params.docs.version')
+          if [ "${documented}" = main ]; then
+            version=main
+          else
+            version=$(printf '%s\n' "${documented}" | sed -nE 's/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/\1.\2/p')
+          fi
+          if [ -z "${version}" ]; then
+            echo "::error::params.docs.version in hugo.yaml is \"${documented}\", not vMAJOR.MINOR.PATCH or main"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "documented ${documented}: documentation version ${version}"
 
-  # ⛔ --strict ABOVE DOES NOT FETCH ANYTHING. It resolves links BETWEEN
-  # documents and fails on an unknown config key; an https:// URL is just
-  # text to it. So this repository published
-  #     Path B -- Pure-UEFI loader. Lives in [`loader/`](https://github.com/cloud-boot/loader)
-  # for ten weeks while that URL returned 404, because the repository had
-  # never been pushed. A strict build was green throughout.
-  links:
-    name: every external link resolves
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check
+      # --panicOnWarning: a relref to a page that is not there, a deprecated
+      # setting or a template warning fails the build rather than scrolling by.
+      - name: Build
         env:
-          GH_TOKEN: ${{ github.token }}
+          HUGO_ENVIRONMENT: production
+        run: >-
+          hugo --gc --minify --panicOnWarning --printPathWarnings
+          --baseURL "${DOCS_URL}/${{ steps.version.outputs.version }}/"
+
+      - name: Lay out the site for the link check
         run: |
-          set -uo pipefail
-          # The character class matters: an extractor that stops only at )
-          # and " carries a closing > or < into the request.
-          urls=$(grep -rhoE 'https?://[^)">< [:space:]]+' docs/ README.md | sed -E 's/[.,`]+$//' | sort -u)
-          test -n "$urls" || { echo "::error::no links found; are the docs still there?"; exit 1; }
-          echo "checking $(printf '%s\n' "$urls" | wc -l) distinct URLs"
-          fail=0
-          while read -r u; do
-            # img.shields.io renders whatever it is asked for and proves nothing.
-            case "$u" in
-              # Renders whatever it is asked for; proves nothing.
-              *img.shields.io*) continue ;;
-              # Documented placeholders. keystone.example.com is what an
-              # OpenStack endpoint looks like in an example, not a host.
-              *example.com*|*example.org*|*example.net*|*localhost*|*127.0.0.1*|*.invalid*) continue ;;
-              # 169.254.169.254 is the cloud metadata service: link-local by
-              # definition, reachable only from inside an instance. Quoting it
-              # is the point of the page that quotes it.
-              *169.254.169.254*) continue ;;
-            esac
-            # A file on GitHub is asked of the API, not of github.com's HTML:
-            # github.com answers a burst from a runner with 503 for pages that
-            # exist (11 of them on 2026-10-10, all 200 from elsewhere). The
-            # contents API says 200 or 404 about the file itself.
-            case "$u" in
-              https://github.com/*/*/blob/*|https://github.com/*/*/tree/*)
-                p=${u#https://github.com/}; p=${p%%#*}; p=${p%%\?*}
-                IFS=/ read -r o r _ ref file <<< "$p"
-                code=$(gh api -i "repos/$o/$r/contents/$file?ref=$ref" 2>/dev/null | head -1 | awk '{print $2}') || true  # head closes the pipe: SIGPIPE, 141 under -e
-                code=${code:-000}
-                case "$code" in
-                  2*) printf '  ok   %s  %s (api)\n' "$code" "$u"; continue ;;
-                  404) printf '  FAIL %s  %s (api)\n' "$code" "$u"; fail=1; continue ;;
-                esac ;;  # anything else: fall through to curl below
-            esac
-            # Three attempts: one is a flake detector rather than a link
-            # checker, and a lane that fails at random gets ignored.
-            code=000
-            for _ in 1 2 3; do
-              # NOT `|| echo 000`: curl prints 000 itself on a DNS failure and
-              # ALSO exits non-zero, so the fallback appended a second one and
-              # the report said 000000.
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" 2>/dev/null) || true
-              code=${code:-000}
-              case "$code" in 2*|3*) break ;; esac
-              sleep 3
-            done
-            case "$code" in
-              2*|3*) printf '  ok   %s  %s\n' "$code" "$u" ;;
-              *)     printf '  FAIL %s  %s\n' "$code" "$u"; fail=1 ;;
-            esac
-          done <<< "$urls"
-          test "$fail" -eq 0 || { echo "::error::at least one link does not resolve"; exit 1; }
+          mkdir -p _check/docs
+          cp -R public "_check/docs/${{ steps.version.outputs.version }}"
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline --no-progress --include-fragments
+            --index-files index.html
+            --root-dir ${{ github.workspace }}/_check
+            '_check/docs/**/*.html'
+          fail: true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: public
+          retention-days: 7
 
   deploy:
-    # Only main publishes. A pull request stops after build above: it has no
-    # business pushing to gh-pages.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
-    # Never two deploys at once: mike pushes gh-pages and the second is
-    # rejected outright. cancel-in-progress stays false -- killing a publish
-    # half way through is worse than making it wait.
+    # Never two deploys at once: both would push gh-pages and the second would
+    # be rejected. cancel-in-progress stays false — killing a publish half way
+    # through is worse than making it wait.
     concurrency:
       group: gh-pages-deploy
       cancel-in-progress: false
@@ -122,32 +107,54 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
+          path: gh-pages
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Switch to gh-pages
+        working-directory: gh-pages
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch -q origin gh-pages
+            git checkout -q -B gh-pages FETCH_HEAD
+          else
+            echo "no gh-pages branch yet: starting one"
+            git checkout -q --orphan gh-pages
+            git rm -rqf .
+            git clean -fdxq
+          fi
+
+      - uses: actions/download-artifact@v8
         with:
-          python-version: "3.15"
+          name: site
+          path: site
 
-      - name: Install MkDocs Material + mike
+      # Only the version being built is replaced; every other version stays as
+      # it is, and /docs/latest/ follows the newest.
+      - name: Publish ${{ needs.build.outputs.version }}
+        working-directory: gh-pages
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          version="${{ needs.build.outputs.version }}"
+          rm -rf "docs/${version}"
+          mkdir -p "docs/${version}"
+          cp -R ../site/. "docs/${version}/"
+          newest=$(ls docs | grep -E '^[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n | tail -1 || true)
+          if [ -n "${newest}" ]; then
+            rm -rf docs/latest
+            cp -R "docs/${newest}" docs/latest
+          fi
+          touch .nojekyll
 
-      - name: Configure git for mike
+      - name: Push gh-pages
+        working-directory: gh-pages
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      # mike publishes versioned docs to the gh-pages branch; GitHub Pages serves
-      # that branch at https://cloud-boot.github.io/docs/. The version label
-      # tracks main as "0.1" aliased "latest"; tag-driven versions can be added
-      # later. /docs/ redirects to the default ("latest").
-      - name: Deploy versioned docs
-        run: |
-          git fetch origin gh-pages --depth=1 || true
-          mike deploy --push --update-aliases 0.1 latest
-          mike set-default --push latest
+          git add -A
+          if git diff --cached --quiet; then
+            echo "nothing changed"
+            exit 0
+          fi
+          git commit -q -m "Deployed ${GITHUB_SHA::7} to ${{ needs.build.outputs.version }} with Hugo ${HUGO_VERSION}"
+          git push origin HEAD:gh-pages

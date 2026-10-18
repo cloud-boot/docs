@@ -1,0 +1,87 @@
+# cloud-boot documentation — Hugo + Hextra, built like go-plot/docs and
+# go-ndarray/docs.
+#
+# Each documentation version is a separate build under
+# https://cloud-boot.github.io/docs/<version>/, where <version> is the minor version of the
+# code the pages describe, or "main" while no release is tagged. The CI sets it
+# through --baseURL, from params.docs.version below; this default is the same
+# build.
+#
+# ⛔ What this replaced was MkDocs Material plus mike, which needed a Python
+# toolchain, a requirements.txt and a pip install in CI to render a static site
+# for a pure-Go organisation.
+baseURL: "https://cloud-boot.github.io/docs/main/"
+title: "cloud-boot"
+# ⛔ No languageCode: deprecated in Hugo 0.158 in favour of locale, and the
+# languages block below already says which language this is. The second
+# deprecation the pilot build refused, after cascade._target — both inherited
+# from copying an older site in this fleet.
+
+# themes/hextra is the tannevaled/hextra fork, pinned at a release tag as a
+# submodule: upstream Hextra plus opt-in features (partial menu items, combos,
+# related-sites menu, page subtitle and history, darkreaderLock).
+theme: hextra
+
+defaultContentLanguage: en
+defaultContentLanguageInSubdir: false
+
+languages:
+  en:
+    label: "English"
+    contentDir: content/en
+    weight: 1
+
+enableRobotsTXT: true
+# Git history dates every page: "Last updated on" at the foot of each one.
+enableGitInfo: true
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+    parser:
+      attribute:
+        title: true
+        # ⛔ Block attributes, because every converted heading carries an
+        # explicit id — "## Heading {#the-mkdocs-slug}". The two slug rules
+        # disagree: Python-Markdown drops an em dash and collapses the gap it
+        # leaves into ONE hyphen, goldmark keeps one hyphen per space. An
+        # anchor is a URL somebody may have saved, so the old spelling is
+        # kept. Without this setting the braces are printed as text.
+        block: true
+  highlight:
+    noClasses: false
+
+# ⛔ The content is NOT under content/en/docs. This site is served AT /docs/,
+# so a "docs" section would make every page /docs/docs/… . Hextra picks its
+# documentation layout from the section being called "docs", so with the
+# content at the root the type is cascaded instead.
+# ⛔ "target", not "_target": the underscored spelling was deprecated in Hugo
+# 0.156 and the fleet's older Hextra sites still carry it, so copying one of
+# them is how a converted site arrives with a deprecation. The build runs with
+# --panicOnWarning, which is what caught this on the first pilot.
+cascade:
+  - target:
+      path: "/**"
+    params:
+      type: docs
+
+params:
+  docs:
+    version: "main"
+  description: ">-"
+  navbar:
+    displayTitle: true
+    displayLogo: false
+  theme:
+    default: system
+    displayToggle: true
+  footer:
+    enable: true
+    displayCopyright: false
+    displayPoweredBy: false
+  page:
+    width: normal
+  editURL:
+    enable: true
+    base: "https://github.com/cloud-boot/edit/main/content/en"
