@@ -132,7 +132,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
 
       # ⛔ THE VERSION GOES AT THE BRANCH ROOT. This step used to write
       # docs/<version>/ — but a project repository named "docs" is ALREADY
